@@ -12,20 +12,40 @@ See [`docs/azure-sev-snp-attestation-brief.pdf`](docs/azure-sev-snp-attestation-
 
 ```
 .
-├── Containerfile          # Container image definition
+├── Containerfile          # Container image definition (Ubuntu 24.04 base)
 ├── run.sh                 # Entry point script
+├── .gitignore
 └── docs/
     └── azure-sev-snp-attestation-brief.pdf
 ```
 
 ## Quick start
 
+This tooling runs **on** an Azure Confidential VM and reads the SEV-SNP report
+from the guest vTPM. The Azure CVM customizations (confidential-compute kernel,
+paravisor/OpenHCL, vTPM provisioning, measured boot) live in the host VM image,
+not in the container — so first provision the VM, then run the container on it
+with the TPM passed through.
+
 ```bash
-# Build the container
+# 1. Provision an Ubuntu 24.04 LTS Confidential VM (AMD SEV-SNP, Gen2).
+#    Free image; use `ubuntu-pro-cvm` instead for ongoing Pro patching.
+az vm create \
+  --name solpbc-cvm \
+  --resource-group <your-rg> \
+  --image Canonical:ubuntu-24_04-lts:cvm:latest \
+  --size Standard_DC2as_v5 \
+  --security-type ConfidentialVM \
+  --enable-vtpm true \
+  --enable-secure-boot true \
+  --os-disk-security-encryption-type VMGuestStateOnly \
+  --admin-username azureuser --generate-ssh-keys
+
+# 2. On the CVM: build the container.
 podman build -t solpbc .
 
-# Run
-./run.sh
+# 3. Run it, passing through the vTPM resource-manager device.
+podman run --rm --device /dev/tpmrm0 solpbc
 ```
 
 ## Attestation approach
@@ -47,8 +67,11 @@ Key properties:
 
 ## Prerequisites
 
-- Azure DCasv5/ECasv5 (or newer) Confidential VM with vTPM enabled
-- `tpm2-tools`, `openssl`, `xxd`, `jq`
+- Azure DCasv5/ECasv5 (or newer) Confidential VM with vTPM enabled, provisioned
+  from a Confidential-Compute host image (Ubuntu 24.04 LTS, AMD64 Gen2):
+  - `Canonical:ubuntu-24_04-lts:cvm:latest` — free
+  - `Canonical:ubuntu-24_04-lts:ubuntu-pro-cvm:latest` — Ubuntu Pro (ongoing patching)
+- `tpm2-tools`, `openssl`, `xxd`, `jq` (provided by the container; see `Containerfile`)
 - Rust toolchain (for `snpguest` with `--features hyperv`)
 
 ## References
