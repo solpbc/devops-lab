@@ -1,0 +1,40 @@
+# macOS
+.DS_Store
+.AppleDouble
+.LSOverride
+._*
+
+# Editor / IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# Rust / snpguest build artifacts
+/target/
+**/*.rs.bk
+Cargo.lock
+
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+
+# Attestation artifacts & secrets (never commit)
+*.pem
+*.key
+*.cert
+*.crt
+*.der
+*.bin
+*.quote
+*.report
+hcl-blob*
+nonce*
+
+# Logs & temp
+*.log
+*.tmp
+tmp/
