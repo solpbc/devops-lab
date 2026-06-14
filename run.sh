@@ -23,6 +23,7 @@ OUT_DIR="${OUT_DIR:-/out}"
 
 REPORT="${OUT_DIR}/report.bin"
 REQUEST="${OUT_DIR}/request.txt"
+CERTS_DIR="${OUT_DIR}/certs"
 TPM_DEV="/dev/tpm0"
 
 echo "== solpbc :: AMD SEV-SNP attestation demo =="
@@ -48,25 +49,43 @@ EOF
 fi
 
 echo
-echo "[1/2] Fetching attestation report from vTPM (VMPL 0, --platform)..."
+echo "[1/4] Fetching attestation report from vTPM (VMPL 0, --platform)..."
 snpguest report --platform "$REPORT" "$REQUEST"
 size="$(wc -c < "$REPORT" | tr -d ' ')"
 echo "      wrote ${REPORT} (${size} bytes)"
 
 echo
-echo "[2/2] Decoding attestation report:"
+echo "[2/4] Decoding attestation report:"
 echo
 snpguest display report "$REPORT"
+
+# The fetch steps reach out to the AMD Key Distribution Service
+# (kdsintf.amd.com). The processor model and chip/TCB are derived from the
+# V3 report itself, so no hardware details need to be hardcoded.
+echo
+echo "[3/4] Fetching AMD certificate chain from the KDS..."
+mkdir -p "$CERTS_DIR"
+echo "      - ARK + ASK (certificate authority)"
+snpguest fetch ca pem "$CERTS_DIR" --report "$REPORT"
+echo "      - VCEK (chip- and TCB-specific endorsement key)"
+snpguest fetch vcek pem "$CERTS_DIR" "$REPORT"
+
+echo
+echo "[4/4] Verifying the trust chain..."
+echo "      - VCEK chains to the AMD root (ARK -> ASK -> VCEK):"
+snpguest verify certs "$CERTS_DIR"
+echo "      - report is signed by that VCEK:"
+snpguest verify attestation "$CERTS_DIR" "$REPORT"
 
 cat <<'EOF'
 
 -- demo complete --
-Got a genuine, AMD-signed SEV-SNP report straight from the vTPM, with no
-Microsoft Azure Attestation (MAA) in the loop.
+The SEV-SNP report was fetched from the vTPM and verified all the way to the
+AMD root certificate -- genuine AMD-hardware-signed evidence, with no Microsoft
+Azure Attestation (MAA) in the trust path. That is the core thesis of solpbc.
 
-Next milestone: verify it against the AMD cert chain --
-  snpguest fetch ca   ...   # ARK + ASK for this CPU (Milan)
-  snpguest fetch vcek ...   # chip- and TCB-specific endorsement key
-  snpguest verify certs ...
-  snpguest verify attestation ...
+Next milestone: bind the vTPM quote for freshness. The report's report_data
+commits to the HCL runtime data, which carries the vTPM AK public key; verifying
+the AK-signed quote over (nonce || guest_pubkey || ctx) closes the loop. This is
+custom logic beyond snpguest and is not yet implemented here.
 EOF
