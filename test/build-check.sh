@@ -3,15 +3,17 @@
 # build-check.sh — repeatable test harness for the solpbc Containerfile.
 #
 # Runs the tiers that DON'T need SEV-SNP hardware:
-#   Tier 0  lint     — static Containerfile lint (hadolint, if available)
-#   Tier 1  build    — build the image (proves apt deps + snpguest compile)
-#   Tier 2  smoke    — run snpguest --help to confirm the hyperv build works
+#   Tier 0  lint      — static Containerfile lint (hadolint, if available)
+#   Tier 1  build     — build the image (proves apt deps + snpguest compile)
+#   Tier 2  smoke     — run snpguest --help to confirm the hyperv build works
+#   Tier 3  selftest  — exercise the HCLA/freshness logic (lib/hcl.sh) on a
+#                       synthetic fixture; no TPM required
 #
-# The full attestation path (Tier 3) requires a live Azure SEV-SNP CVM with a
+# The full attestation path (Tier 4) requires a live Azure SEV-SNP CVM with a
 # vTPM and is intentionally NOT covered here.
 #
 # Usage:
-#   test/build-check.sh [lint|build|smoke|all]   (default: all)
+#   test/build-check.sh [lint|build|smoke|selftest|all]   (default: all)
 #
 # Notes:
 #   * Requires an x86_64 host — the sev/snpguest crates target AMD x86.
@@ -76,12 +78,19 @@ run_smoke() {
     || warn "could not confirm --platform flag (check snpguest version)"
 }
 
+# --- Tier 3: selftest --------------------------------------------------------
+run_selftest() {
+  log "Tier 3: HCLA/freshness self-test (no hardware)"
+  bash "${REPO_ROOT}/test/freshness-selftest.sh"
+}
+
 case "$STAGE" in
-  lint)  run_lint ;;
-  build) run_build ;;
-  smoke) run_smoke ;;
-  all)   run_lint; run_build; run_smoke ;;
-  *)     die "unknown stage '$STAGE' (use: lint|build|smoke|all)" ;;
+  lint)     run_lint ;;
+  build)    run_build ;;
+  smoke)    run_smoke ;;
+  selftest) run_selftest ;;
+  all)      run_lint; run_build; run_smoke; run_selftest ;;
+  *)        die "unknown stage '$STAGE' (use: lint|build|smoke|selftest|all)" ;;
 esac
 
 log "done"

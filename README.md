@@ -13,7 +13,12 @@ See [`docs/azure-sev-snp-attestation-brief.pdf`](docs/azure-sev-snp-attestation-
 ```
 .
 ├── Containerfile          # Container image definition (Ubuntu 24.04 base)
-├── run.sh                 # Entry point script
+├── run.sh                 # Entry point: AMD chain + vTPM quote freshness binding
+├── lib/
+│   └── hcl.sh             # HCLA parsing + freshness-binding helpers (custom logic)
+├── test/
+│   ├── build-check.sh     # Hardware-free build/lint/smoke/selftest harness
+│   └── freshness-selftest.sh  # Off-hardware tests for lib/hcl.sh
 ├── .gitignore
 └── docs/
     └── azure-sev-snp-attestation-brief.pdf
@@ -57,9 +62,22 @@ podman run --rm --device /dev/tpm0 --device /dev/tpmrm0 \
   --group-add keep-groups -v "$PWD:/out" solpbc
 ```
 
-This writes `report.bin` to the working directory and prints the decoded
-attestation report. Verifying it against the AMD cert chain is the next
-milestone (see [Attestation approach](#attestation-approach)).
+On a CVM this runs the full chain: it fetches and decodes the SEV-SNP report,
+verifies it to the AMD root, then reads the HCLA blob, confirms the runtime-data
+binding, proves the vTPM AK is AMD-bound, and takes a fresh AK-signed quote
+(see [Attestation approach](#attestation-approach)). Off-hardware it exits
+cleanly with guidance.
+
+To exercise the HCLA parsing and freshness-binding logic **without** a CVM (just
+`bash`, `openssl`, `jq`, `xxd`, `base64`), run the self-test:
+
+```bash
+./test/freshness-selftest.sh        # or: ./test/build-check.sh selftest
+```
+
+It fabricates a synthetic HCLA blob (with a stand-in RSA AK and a `report_data`
+set to `H(runtime data)`) and drives every check in `lib/hcl.sh`, including the
+negative cases.
 
 ## Attestation approach
 
@@ -77,6 +95,26 @@ Key properties:
 - No Microsoft as verifier: the verifier appraises the raw AMD report + vTPM quote directly
 - Freshness: vTPM quote qualifying data carries the nonce + guest ephemeral public key
 - Guest image integrity: vTPM PCRs + event log + optional IMA/dm-verity (not the AMD launch measurement, which covers HCL/UEFI only)
+
+### What `run.sh` implements
+
+`run.sh` runs the chain in eight steps; the custom logic beyond `snpguest` lives
+in `lib/hcl.sh`:
+
+1–4. **AMD report.** Fetch the SEV-SNP report from the vTPM (`snpguest report --platform`), decode it, fetch the AMD CA + VCEK from the KDS, and verify the cert chain and report signature.
+
+5. **Read the HCLA blob** from vTPM NV `0x01400001`, verify its header, and split out the embedded AMD report and the runtime-data JSON.
+
+6. **Runtime-data binding.** Confirm `SHA-256(runtime data) == report_data[0..32]` — i.e. the AMD report commits to the HCL runtime claims.
+
+7. **AK binding.** Extract `HCLAkPub` from the runtime claims and confirm it is the live vTPM AK by matching RSA moduli. The AK is trusted because it is inside AMD-bound runtime data, *not* because Azure issued a cert for it. (Matching the modulus avoids reconstructing a PEM from the JWK; the quote is still verified under the TPM's own AK PEM.)
+
+8. **Freshness.** Generate an ephemeral X25519 guest key, take a nonce, and take an AK-signed TPM quote over the measured-boot PCRs whose qualifying data is `H("sol-key-release-v1" ∥ nonce ∥ guest_pubkey ∥ ctx)`. Verify the quote under the AK and confirm the qualifying data matches.
+
+This closes the loop: a customer-side verifier can release a secret to the
+quoted guest public key with AMD as the only root of trust. Reference values
+for the guest PCR/event-log policy remain the verifier's decision (see the
+brief's "Risks").
 
 ## Prerequisites
 
