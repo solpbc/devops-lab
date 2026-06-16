@@ -66,7 +66,7 @@ head -c "$tail_len" /dev/zero >> amd_report.bin                         # pad to
 #    JSON extractor anchors on `{"` rather than a fixed offset.
 {
   printf 'HCLA'                 # signature
-  le32 2                        # version
+  le32 1                        # version (observed on a live DCasv5 CVM)
   le32 "$HCL_REPORT_SIZE"       # report_size
   le32 2                        # request_type
   le32 0                        # status

@@ -80,8 +80,11 @@ hcl_verify_header() {
     echo "HCLA signature mismatch: got '${sig}', expected '${HCL_SIG}'" >&2
     return 1
   fi
-  if [[ "$version" -ne 2 || "$req_type" -ne 2 ]]; then
-    echo "HCLA header unexpected: version=${version} request_type=${req_type} (expected 2/2)" >&2
+  # Observed on a live DCasv5 CVM: header version is 1 (the research brief said
+  # 2). Accept the known versions and key on the request_type, which is the
+  # field that actually distinguishes an AMD-SNP report request.
+  if { [[ "$version" -ne 1 && "$version" -ne 2 ]]; } || [[ "$req_type" -ne 2 ]]; then
+    echo "HCLA header unexpected: version=${version} request_type=${req_type} (expected version 1 or 2, request_type 2)" >&2
     return 1
   fi
   echo "sig=${sig} version=${version} request_type=${req_type}"
