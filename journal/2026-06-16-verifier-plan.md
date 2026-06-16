@@ -2,7 +2,7 @@
 
 Captured 2026-06-15 for review/presentation. This is the design + todo for the
 next build after the freshness binding (now closed and demonstrated on
-hardware, see [2026-06-15.md](2026-06-15.md)).
+hardware, see [2026-06-16.md](2026-06-16.md)).
 
 ## Why
 

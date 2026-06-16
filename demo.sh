@@ -20,7 +20,7 @@
 #
 # NOTE: the verifier here runs in the same container as the attester purely so
 # the demo is self-contained; a real verifier runs on separate, customer-
-# controlled hardware. See journal/2026-06-15-verifier-plan.md.
+# controlled hardware. See journal/2026-06-16-verifier-plan.md.
 
 set -euo pipefail
 

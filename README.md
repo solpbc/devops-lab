@@ -155,7 +155,7 @@ unwrap it. What's deliberately **not** real here, flagged inline as `[TOY GAP]`:
 it runs on the CVM rather than a separate verifier, trusts the fetched ARK
 unless pinned, uses unauthenticated AES-CTR instead of an AEAD, and has only a
 record-then-pin PCR policy (no Microsoft HCL reference values). The real
-verifier is the next milestone — see `journal/2026-06-15-verifier-plan.md`.
+verifier is the next milestone — see `journal/2026-06-16-verifier-plan.md`.
 
 The hardware-free parts (policy parsing, key-release round-trip) are covered by
 `./test/verifier-selftest.sh`.
