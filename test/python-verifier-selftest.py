@@ -113,7 +113,21 @@ def main() -> int:
             ),
         )
 
-    print("\n== summary: 13 passed, 0 failed ==")
+        report_bytes = bytearray((raw["bundle"] / "report.bin").read_bytes())
+        report_bytes[0x1A0:0x1E0] = bytes(range(64))
+        parsed = verifier.SnpReport.parse(bytes(report_bytes))
+        url = verifier.vcek_url(parsed, verifier.VCEK_SOURCES["kds"])
+        assert "/vcek/v1/Milan/" in url, url
+        assert url.endswith("blSPL=4&teeSPL=0&snpSPL=24&ucodeSPL=219"), url
+        assert bytes(range(64)).hex() in url
+        ok("vcek URL built from CHIP_ID + reported TCB")
+        zeroed = verifier.SnpReport.parse((raw["bundle"] / "report.bin").read_bytes())
+        expect_fail(
+            "vcek: zeroed CHIP_ID rejected",
+            lambda: verifier.vcek_url(zeroed, verifier.VCEK_SOURCES["kds"]),
+        )
+
+    print("\n== summary: 15 passed, 0 failed ==")
     return 0
 
 

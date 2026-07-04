@@ -520,6 +520,67 @@ def appraise_raw_report(
     return result
 
 
+VCEK_SOURCES = {
+    "kds": "https://kdsintf.amd.com",
+    "acccache": "https://americas.acccache.azure.net",
+}
+
+
+def kds_product_for_cpuid(family: int | None, model: int | None) -> str | None:
+    """Map report CPUID to the AMD KDS product string, or None if unknown."""
+    if family == 0x19 and model is not None:
+        if model <= 0x0F:
+            return "Milan"
+        if 0x10 <= model <= 0x1F or 0xA0 <= model <= 0xAF:
+            return "Genoa"
+    if family == 0x1A and model is not None and (0x90 <= model <= 0xAF or 0xC0 <= model <= 0xCF):
+        return "Turin"
+    return None
+
+
+def vcek_url(report: SnpReport, base: str, product: str | None = None) -> str:
+    """Build the VCEK fetch URL from CHIP_ID + reported TCB SPLs."""
+    product = product or kds_product_for_cpuid(report.cpuid_family, report.cpuid_model)
+    if product is None:
+        raise VerificationError(
+            f"cannot infer KDS product from CPUID family={report.cpuid_family} "
+            f"model={report.cpuid_model}; pass --product"
+        )
+    if not any(report.chip_id):
+        raise VerificationError("report CHIP_ID is zeroed; VCEK cannot be located")
+    tcb = report.reported_tcb
+    query = (
+        f"blSPL={tcb.boot_loader}&teeSPL={tcb.tee}"
+        f"&snpSPL={tcb.snp}&ucodeSPL={tcb.microcode}"
+    )
+    if tcb.fmc is not None:
+        query = f"fmcSPL={tcb.fmc}&{query}"
+    return f"{base}/vcek/v1/{product}/{report.chip_id.hex()}?{query}"
+
+
+def fetch_vcek(bundle: Path, *, source: str = "kds", product: str | None = None) -> Path:
+    """Fetch the VCEK for bundle/report.bin into bundle/certs/vcek.pem.
+
+    The certificate is AMD-signed regardless of which mirror serves it; the
+    acccache source is Microsoft-operated but is a CDN, not a trust anchor —
+    appraisal still chains to the locally pinned AMD roots.
+    """
+    import urllib.request
+
+    if source not in VCEK_SOURCES:
+        raise VerificationError(f"unknown VCEK source {source!r}; options: {', '.join(VCEK_SOURCES)}")
+    report = SnpReport.parse((bundle / "report.bin").read_bytes())
+    url = vcek_url(report, VCEK_SOURCES[source], product)
+    with urllib.request.urlopen(url) as resp:
+        der = resp.read()
+    cert = x509.load_der_x509_certificate(der)
+    certs_dir = bundle / "certs"
+    certs_dir.mkdir(parents=True, exist_ok=True)
+    out = certs_dir / "vcek.pem"
+    out.write_bytes(cert.public_bytes(serialization.Encoding.PEM))
+    return out
+
+
 def parse_hcla(blob: bytes) -> HclaBlob:
     if len(blob) < HCL_RUNTIME_OFFSET:
         raise VerificationError(f"HCLA blob is {len(blob)} bytes; expected at least {HCL_RUNTIME_OFFSET}")
@@ -949,6 +1010,14 @@ def main(argv: list[str] | None = None) -> int:
     raw.add_argument("--measurement", help="expected launch MEASUREMENT as 96 hex chars")
     raw.add_argument("--json", action="store_true", help="emit machine-readable appraisal result")
 
+    fetchv = sub.add_parser(
+        "fetch-vcek",
+        help="fetch the VCEK for bundle/report.bin into bundle/certs/ (AMD KDS or Azure mirror)",
+    )
+    fetchv.add_argument("bundle", type=Path)
+    fetchv.add_argument("--source", choices=sorted(VCEK_SOURCES), default="kds")
+    fetchv.add_argument("--product", help="override KDS product (Milan/Genoa/Turin) if CPUID inference fails")
+
     unwrap = sub.add_parser("unwrap-for-test", help="test-only guest-side AEAD unwrap proof")
     unwrap.add_argument("release", type=Path)
     unwrap.add_argument("guest_private_key", type=Path)
@@ -999,6 +1068,10 @@ def main(argv: list[str] | None = None) -> int:
                 for step in result.steps:
                     print(f"PASS {step['name']}: {step['detail']}")
                 print("ALL CHECKS PASSED")
+            return 0
+        if args.cmd == "fetch-vcek":
+            out = fetch_vcek(args.bundle, source=args.source, product=args.product)
+            print(f"wrote {out}")
             return 0
         if args.cmd == "unwrap-for-test":
             unwrap_release_for_test(args.release, args.guest_private_key, args.out)

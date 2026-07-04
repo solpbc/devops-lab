@@ -74,8 +74,9 @@ COPY --from=builder /out/snpguest /usr/local/bin/snpguest
 WORKDIR /app
 COPY fetch-report.py /app/fetch-report.py
 
-# Fetch a report at startup (random nonce; shows up in container logs), then
-# stay alive for exec-driven runs with a verifier-supplied --nonce-hex.
-# templates/aci-solpbc.json overrides this with plain sleep; drop the
-# template's "command" to get the auto-fetch behavior.
-ENTRYPOINT ["/bin/sh", "-c", "python3 /app/fetch-report.py --out /tmp/report.bin; exec sleep infinity"]
+# Fetch a report at startup and print it (base64) to stdout — i.e. into
+# container logs, which is the report's machine-readable path out of the TEE.
+# NONCE_HEX (set by templates/aci-solpbc.json from the nonceHex deployment
+# parameter) binds a verifier nonce; unset, a random nonce is used. The
+# container then stays alive for exec-driven re-attestation.
+ENTRYPOINT ["/bin/sh", "-c", "python3 /app/fetch-report.py ${NONCE_HEX:+--nonce-hex \"$NONCE_HEX\"} --out /tmp/report.bin; exec sleep infinity"]

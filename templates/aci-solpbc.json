@@ -19,6 +19,12 @@
       "metadata": {
         "description": "ACR pull password/token. Not part of the CCE policy."
       }
+    },
+    "nonceHex": {
+      "type": "string",
+      "metadata": {
+        "description": "Verifier nonce bound into REPORT_DATA at startup (32 or 64 bytes hex). Deliberately absent from the policy-generation params file so confcom wildcards the env value; supply it at deployment time only."
+      }
     }
   },
   "resources": [
@@ -46,7 +52,14 @@
             "name": "solpbc",
             "properties": {
               "image": "[parameters('image')]",
-              "command": ["/bin/sh", "-c", "sleep infinity"],
+              "command": [
+                "/bin/sh",
+                "-c",
+                "python3 /app/fetch-report.py ${NONCE_HEX:+--nonce-hex \"$NONCE_HEX\"} --out /tmp/report.bin; exec sleep infinity"
+              ],
+              "environmentVariables": [
+                { "name": "NONCE_HEX", "value": "[parameters('nonceHex')]" }
+              ],
               "resources": {
                 "requests": { "cpu": 1, "memoryInGB": 2 }
               }

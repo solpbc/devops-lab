@@ -211,14 +211,31 @@ podman run --rm \
   bash -c 'az extension add --name confcom -y && az confcom acipolicygen -a /work/template.json -p /work/params.json --debug-mode --tar /work/tarmap.json'
 ```
 
-**4. Deploy and exec in.** The `Confidential` sku and the `solpbc` group and
-container names come from the template.
+**4. Deploy, attest, appraise — no exec, no copy/paste.** The template binds a
+verifier nonce (the `nonceHex` deployment parameter, wildcarded in the policy
+because it's absent from `params.json`) into `REPORT_DATA` at startup, and the
+container prints the report as base64 into its logs — the report's
+machine-readable path out of the TEE. `fetch-vcek` locates the AMD cert from
+the report itself (CHIP_ID + reported TCB; `--source acccache` uses
+Microsoft's mirror of the same AMD-signed certs, no KDS rate limits). The
+appraisal needs Python ≥3.11 plus `requirements.txt`; on a Mac without one,
+run these two commands in any `python:3.12` container with the repo and
+bundle mounted.
 
 ```sh
-az deployment group create -g "$RG" --template-file template.json --parameters @params.json
-az container exec -g "$RG" -n solpbc --container-name solpbc --exec-command /bin/bash
+NONCE=$(openssl rand -hex 32)
+az deployment group create -g "$RG" --template-file template.json \
+  --parameters @params.json --parameters nonceHex=$NONCE
+mkdir -p bundle
+az container logs -g "$RG" -n solpbc | grep -E '^[A-Za-z0-9+/=]{200,}$' | tail -1 | base64 -d > bundle/report.bin
+jq -r '.resources[0].properties.confidentialComputeProperties.ccePolicy' template.json > policy.b64
+python3 verifier.py fetch-vcek bundle
+python3 verifier.py appraise-raw bundle --roots roots/amd --cce-policy-file policy.b64 --nonce-hex $NONCE
 ```
 
+Expect six `PASS` lines and `ALL CHECKS PASSED`. The nonce is fixed per
+deployment; to re-attest with a fresh one, redeploy with a new `nonceHex`, or
+`az container exec` in and run `fetch-report.py --nonce-hex <new>` manually.
 `params.json` holds a registry password — don't commit it.
 
 **5. Clean up.** The container group bills while it runs (`sleep infinity`
