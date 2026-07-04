@@ -16,9 +16,8 @@ See [`docs/azure-sev-snp-attestation-brief.pdf`](docs/azure-sev-snp-attestation-
 ├── Makefile               # Local install/check/test convenience targets
 ├── aci-cc-testbed.sh      # ACI Confidential Containers testbed (raw SNP path)
 ├── aks-cc-testbed.sh      # AKS EC*_cc testbed (kata-cc; preview sunset 2026-03)
-├── arm/
+├── templates/             # Azure deployment templates + AKS probe pod manifests
 │   └── aci-snp-probe.json # Confidential container group ARM template
-├── yaml/                  # AKS probe pod manifests
 ├── requirements.txt       # Python dependency set for verifier.py
 ├── demo.sh                # Default entrypoint: full challenge->attest->appraise demo
 ├── run.sh                 # Attester: AMD chain + vTPM quote freshness binding
@@ -144,7 +143,7 @@ podman tag solpbc "$IMAGE"
 podman push "$IMAGE"
 ```
 
-**2. Prepare the ARM template.** Start from `arm/aci-snp-probe.json`: set the
+**2. Prepare the ARM template.** Start from `templates/aci-snp-probe.json`: set the
 container image to `$IMAGE` and override the entrypoint (`demo.sh` expects a
 vTPM) with `"command": ["/bin/sh", "-c", "sleep infinity"]`. ACR does not
 allow anonymous pull, so the container group must carry pull credentials in

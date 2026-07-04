@@ -11,7 +11,7 @@
 set -euo pipefail
 
 DIR="$(cd "$(dirname "$0")" && pwd)"
-TEMPLATE_SRC="$DIR/arm/aci-snp-probe.json"
+TEMPLATE_SRC="$DIR/templates/aci-snp-probe.json"
 
 RG=solpbc-acicc-rg
 LOC=eastus            # confidential ACI is GA in most major regions

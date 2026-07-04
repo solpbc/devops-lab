@@ -14,7 +14,7 @@
 # failures.
 set -euo pipefail
 
-YAML_DIR="$(cd "$(dirname "$0")" && pwd)/yaml"   # probe pod manifests
+TEMPLATES_DIR="$(cd "$(dirname "$0")" && pwd)/templates"   # probe pod manifests
 
 RG=solpbc-akscc-rg
 LOC=eastus                       # cc_v5 SKUs are region-limited; verify below.
@@ -78,16 +78,16 @@ kubectl get nodes -o wide
 
 # ---------------------------------------------------------------- 2. Layer-1 probe:
 # pod inside a SEV-SNP child UVM. Determines the child attestation path.
-# Manifest: yaml/snp-probe.yaml (kept pristine — policy is injected at apply time)
+# Manifest: templates/snp-probe.yaml (kept pristine — policy is injected at apply time)
 #
 # generate a *debug* CCE policy (permits exec/logs — test only) without
 # mutating the manifest; --print-policy emits the base64 Rego to stdout:
-POLICY_B64=$(az confcom katapolicygen -y "$YAML_DIR/snp-probe.yaml" --debug-mode --print-policy)
+POLICY_B64=$(az confcom katapolicygen -y "$TEMPLATES_DIR/snp-probe.yaml" --debug-mode --print-policy)
 # record the policy hash — this is what should land in HOST_DATA:
 echo "$POLICY_B64" | base64 -d | sha256sum
 
 # inject the policy annotation client-side and apply (source file untouched):
-kubectl annotate --local -f "$YAML_DIR/snp-probe.yaml" -o yaml \
+kubectl annotate --local -f "$TEMPLATES_DIR/snp-probe.yaml" -o yaml \
   "io.katacontainers.config.agent.policy=$POLICY_B64" | kubectl apply -f -
 kubectl exec -it snp-probe -- bash
 # --- inside the UVM, the decisive checks: ---
@@ -104,8 +104,8 @@ kubectl exec -it snp-probe -- bash
 # ---------------------------------------------------------------- 3. Layer-2 probe:
 # privileged runc pod on the *parent* node. Determines whether we could launch
 # our own children (own OVMF, ID block) — the solstone trust-shape question.
-# Manifest: yaml/parent-probe.yaml
-kubectl apply -f "$YAML_DIR/parent-probe.yaml"
+# Manifest: templates/parent-probe.yaml
+kubectl apply -f "$TEMPLATES_DIR/parent-probe.yaml"
 kubectl exec -it parent-probe -- bash
 # --- on the parent: ---
 #   ls -l /host/dev/sev /host/dev/sev-guest
