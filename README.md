@@ -135,6 +135,7 @@ because the Hub throttles anonymous pulls from ACI IP ranges. Bare
 
 ```sh
 podman build --platform linux/amd64 -t solpbc .
+az provider register --namespace Microsoft.ContainerRegistry --wait
 az group create -n "$RG" -l "$LOC"
 az acr create -g "$RG" -n "$ACR" --sku Basic --admin-enabled true
 TOKEN=$(az acr login -n "$ACR" --expose-token --query accessToken -o tsv)
