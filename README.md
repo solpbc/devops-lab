@@ -14,6 +14,11 @@ See [`docs/azure-sev-snp-attestation-brief.pdf`](docs/azure-sev-snp-attestation-
 .
 ├── Containerfile          # Container image definition (Ubuntu 24.04 base)
 ├── Makefile               # Local install/check/test convenience targets
+├── aci-cc-testbed.sh      # ACI Confidential Containers testbed (raw SNP path)
+├── aks-cc-testbed.sh      # AKS EC*_cc testbed (kata-cc; preview sunset 2026-03)
+├── arm/
+│   └── aci-snp-probe.json # Confidential container group ARM template
+├── yaml/                  # AKS probe pod manifests
 ├── requirements.txt       # Python dependency set for verifier.py
 ├── demo.sh                # Default entrypoint: full challenge->attest->appraise demo
 ├── run.sh                 # Attester: AMD chain + vTPM quote freshness binding
@@ -98,6 +103,68 @@ It fabricates a synthetic HCLA blob (with a stand-in RSA AK and a `report_data`
 set to `H(runtime data)`) and drives every check in `lib/hcl.sh`, including the
 negative cases.
 
+## Running on ACI Confidential Containers (no vTPM)
+
+ACI's confidential SKU runs the container inside an unparavisored SEV-SNP UVM
+at VMPL0 with a native `/dev/sev-guest` — no vTPM, no HCLA blob, no paravisor
+(verified 2026-07-04; see `journal/2026-07-04.md`). The vTPM demo flow
+(`demo.sh`/`run.sh`) therefore does not apply; the ACI path is: fetch the raw
+report in-TEE, appraise it off-TEE with `verifier.py appraise-raw`. Freshness
+comes from `REPORT_DATA` carrying the verifier nonce directly, and workload
+identity from `HOST_DATA` carrying the SHA-256 of the CCE policy.
+
+```bash
+# 1. Build for amd64 (mandatory on Apple Silicon: CCE policies are amd64-only)
+#    and push to a registry ACI can pull. Use ACR — Docker Hub throttles
+#    anonymous pulls from ACI IP ranges.
+podman build --platform linux/amd64 -t solpbc .
+az acr create -g <rg> -n <registry> --sku Basic
+az acr login -n <registry>    # or: podman login with ACR admin/token creds
+podman tag solpbc <registry>.azurecr.io/solpbc:latest
+podman push <registry>.azurecr.io/solpbc:latest
+
+# 2. ARM template: start from arm/aci-snp-probe.json; set the container image
+#    to the ACR reference, add imageRegistryCredentials if the registry is
+#    private, and override the entrypoint (demo.sh expects a vTPM):
+#    "command": ["/bin/sh", "-c", "sleep infinity"]
+
+# 3. Generate + inject the CCE policy. confcom is Linux/Windows-only; on macOS
+#    run it inside a container with a podman-saved image tar (the full recipe,
+#    including the --tar mapping, is in aci-cc-testbed.sh). --debug-mode
+#    permits exec/logs — drop it for anything real. The sha256 printed on
+#    injection is the expected HOST_DATA value; save it.
+az confcom acipolicygen -a template.json --debug-mode
+
+# 4. Deploy (sku Confidential is set in the template) and exec in.
+az group create -n <rg> -l eastus
+az deployment group create -g <rg> --template-file template.json
+az container exec -g <rg> -n <group> --container-name <name> --exec-command /bin/bash
+```
+
+In the TEE, fetch a report from `/dev/sev-guest` binding a verifier-issued
+nonce into `REPORT_DATA` — the stock-python ioctl fetcher is in section 2 of
+`aci-cc-testbed.sh`. (The `snpguest` binary in this image is built with the
+`hyperv` vTPM feature for CVMs; it has not been exercised on the ACI raw path.)
+Certificates come from THIM (`169.254.169.254/metadata/THIM/amd/certification`,
+in-fabric) or the AMD KDS — note ACI hardware observed so far is **Genoa**, so
+KDS URLs use the `Genoa` product string and chain to `roots/amd/Genoa`.
+
+Off-TEE, appraise with the raw-report mode:
+
+```bash
+python3 verifier.py appraise-raw <bundle-dir> \
+  --roots roots/amd \
+  --cce-policy-file <base64-policy-from-template> \
+  --nonce-hex <verifier-nonce>
+```
+
+where `<bundle-dir>` holds `report.bin` and `certs/` with the VCEK PEM.
+`appraise-raw` verifies the AMD chain and report signature against the pinned
+roots, SNP policy (VMPL, debug), the nonce in `REPORT_DATA`, and `HOST_DATA`
+against the CCE policy hash (`--host-data <hex>` works too, and
+`--measurement` pins the UVM launch measurement once reference values are
+established).
+
 ## Attestation approach
 
 The verification chain is:
@@ -175,6 +242,11 @@ a secret with X25519 -> HKDF -> AES-256-GCM. See
 [`docs/off-cvm-python-verifier.md`](docs/off-cvm-python-verifier.md) for the
 bundle contract, commands, policy JSON, and the explicit record-then-pin PCR
 reference-values gap.
+
+For raw (non-HCLA) reports — the [ACI Confidential Containers
+path](#running-on-aci-confidential-containers-no-vtpm) — use
+`verifier.py appraise-raw`, which drops the HCLA/AK/quote checks and instead
+binds freshness via `REPORT_DATA` and the CCE policy via `HOST_DATA`.
 
 Hardware-free coverage:
 
