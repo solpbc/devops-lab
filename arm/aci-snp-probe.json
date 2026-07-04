@@ -18,7 +18,7 @@
           {
             "name": "probe",
             "properties": {
-              "image": "ubuntu:24.04",
+              "image": "docker.io/library/ubuntu:24.04",
               "command": ["/bin/sh", "-c", "sleep infinity"],
               "resources": {
                 "requests": { "cpu": 1, "memoryInGB": 2 }
