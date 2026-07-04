@@ -187,8 +187,13 @@ On Linux, it's one command:
 
 ```sh
 az extension add --upgrade --name confcom
-az confcom acipolicygen -a template.json -p params.json --debug-mode
+az confcom acipolicygen -a template.json -p params.json --debug-mode --approve-wildcards
 ```
+
+`--approve-wildcards` consents (non-interactively) to the wildcard rule for
+the `NONCE_HEX` env var — deliberate here: the nonce is unknown at policy
+time, so the policy accepts any value in that one variable and the report
+proves which value was actually bound.
 
 On macOS the confcom extension does not run (`The extension for MacOS has not
 been implemented`), so run it inside a Linux container instead. Two things
@@ -208,7 +213,7 @@ podman run --rm \
   -v /private/tmp/policy-img.tar:/work/img.tar \
   -v /private/tmp/tarmap.json:/work/tarmap.json \
   mcr.microsoft.com/azure-cli \
-  bash -c 'az extension add --name confcom -y && az confcom acipolicygen -a /work/template.json -p /work/params.json --debug-mode --tar /work/tarmap.json'
+  bash -c 'az extension add --name confcom -y && az confcom acipolicygen -a /work/template.json -p /work/params.json --debug-mode --approve-wildcards --tar /work/tarmap.json'
 ```
 
 **4. Deploy, attest, appraise — no exec, no copy/paste.** The template binds a
