@@ -46,7 +46,9 @@ SNP_OFF_PLATFORM_INFO = 0x040
 SNP_OFF_KEY_INFO = 0x048
 SNP_OFF_REPORT_DATA = 0x050
 SNP_OFF_MEASUREMENT = 0x090
+SNP_OFF_HOST_DATA = 0x0C0
 SNP_OFF_REPORTED_TCB = 0x180
+SNP_OFF_CHIP_ID = 0x1A0
 SNP_OFF_CPUID_FAMILY = 0x188
 SNP_OFF_CPUID_MODEL = 0x189
 SNP_OFF_CPUID_STEP = 0x18A
@@ -200,6 +202,8 @@ class SnpReport:
     key_info: int
     report_data: bytes
     measurement: bytes
+    host_data: bytes
+    chip_id: bytes
     cpuid_family: int | None
     cpuid_model: int | None
     cpuid_step: int | None
@@ -231,6 +235,8 @@ class SnpReport:
             key_info=_u32(raw, SNP_OFF_KEY_INFO),
             report_data=raw[SNP_OFF_REPORT_DATA : SNP_OFF_REPORT_DATA + 64],
             measurement=raw[SNP_OFF_MEASUREMENT : SNP_OFF_MEASUREMENT + 48],
+            host_data=raw[SNP_OFF_HOST_DATA : SNP_OFF_HOST_DATA + 32],
+            chip_id=raw[SNP_OFF_CHIP_ID : SNP_OFF_CHIP_ID + 64],
             cpuid_family=family,
             cpuid_model=model,
             cpuid_step=step,
@@ -267,6 +273,9 @@ class AppraisalResult:
     tcb: dict[str, dict[str, int | None]] = field(default_factory=dict)
     pcr_sha256: str | None = None
     release_path: str | None = None
+    host_data: str | None = None
+    measurement: str | None = None
+    chip_id: str | None = None
 
     def ok(self, name: str, detail: str) -> None:
         self.steps.append({"name": name, "status": "ok", "detail": detail})
@@ -283,6 +292,9 @@ class AppraisalResult:
                 "tcb": self.tcb,
                 "pcr_sha256": self.pcr_sha256,
                 "release_path": self.release_path,
+                "host_data": self.host_data,
+                "measurement": self.measurement,
+                "chip_id": self.chip_id,
             },
             indent=2,
             sort_keys=True,
@@ -412,6 +424,99 @@ def appraise_bundle(
     )
     result.release_path = str(release_path)
     result.ok("key-release", f"AES-GCM release written to {release_path}")
+    return result
+
+
+def appraise_raw_report(
+    bundle: Path,
+    *,
+    roots_dir: Path,
+    policy: Policy,
+    expected_host_data: bytes | None = None,
+    nonce_hex: str | None = None,
+    expected_measurement: bytes | None = None,
+) -> AppraisalResult:
+    """Appraise a raw SEV-SNP report with no HCL/vTPM mediation.
+
+    This is the ACI Confidential Containers path (journal 2026-07-04): the UVM
+    runs unparavisored at VMPL0 and /dev/sev-guest returns a native report.
+    Freshness comes from REPORT_DATA carrying the verifier nonce directly;
+    workload identity comes from HOST_DATA carrying the SHA-256 of the CCE
+    policy. Trust chain is report signature -> VCEK -> pinned ASK/ARK only.
+
+    Bundle layout: report.bin plus certs/ containing the VCEK PEM.
+    """
+    result = AppraisalResult(bundle=str(bundle))
+    paths = _bundle_paths(bundle)
+    _require(paths, "report", "certs")
+
+    report = SnpReport.parse(paths["report"].read_bytes())
+    result.report_version = report.version
+    result.cpuid = {
+        "family": report.cpuid_family,
+        "model": report.cpuid_model,
+        "step": report.cpuid_step,
+    }
+    result.tcb = {
+        "current": report.current_tcb.as_dict(),
+        "reported": report.reported_tcb.as_dict(),
+        "committed": report.committed_tcb.as_dict(),
+        "launch": report.launch_tcb.as_dict(),
+    }
+    result.host_data = report.host_data.hex()
+    result.measurement = report.measurement.hex()
+    result.chip_id = report.chip_id.hex()
+
+    vcek = verify_amd_chain_and_report(report, paths["certs"], roots_dir)
+    result.ok("amd-chain", f"VCEK chains to pinned {name_cn(vcek.issuer)} roots")
+    result.ok("amd-report-signature", "VCEK signed report bytes 0..0x29f")
+
+    check_policy(report, policy)
+    result.ok(
+        "snp-policy",
+        f"version={report.version} vmpl={report.vmpl} debug_allowed={report.debug_allowed}",
+    )
+
+    if nonce_hex is not None:
+        nonce = bytes.fromhex("".join(nonce_hex.split()))
+        if len(nonce) == 32:
+            expected = nonce + b"\x00" * 32
+        elif len(nonce) == 64:
+            expected = nonce
+        else:
+            raise VerificationError(f"nonce is {len(nonce)} bytes, expected 32 or 64")
+        if report.report_data != expected:
+            raise VerificationError(
+                "freshness binding failed: REPORT_DATA does not carry the verifier nonce"
+            )
+        result.ok("freshness", "REPORT_DATA == verifier nonce")
+    else:
+        result.ok("freshness", "recorded (no verifier nonce supplied)")
+
+    if expected_host_data is not None:
+        if len(expected_host_data) != 32:
+            raise VerificationError(
+                f"expected HOST_DATA is {len(expected_host_data)} bytes, expected 32"
+            )
+        if report.host_data != expected_host_data:
+            raise VerificationError(
+                "HOST_DATA mismatch: "
+                f"report={report.host_data.hex()} expected={expected_host_data.hex()}"
+            )
+        result.ok("host-data", "HOST_DATA == expected CCE policy hash")
+    else:
+        result.ok("host-data", f"recorded {report.host_data.hex()}")
+
+    if expected_measurement is not None:
+        if report.measurement != expected_measurement:
+            raise VerificationError(
+                "MEASUREMENT mismatch: "
+                f"report={report.measurement.hex()} expected={expected_measurement.hex()}"
+            )
+        result.ok("measurement", "launch MEASUREMENT matches pinned reference")
+    else:
+        result.ok("measurement", f"recorded {report.measurement.hex()}")
+
     return result
 
 
@@ -826,6 +931,24 @@ def main(argv: list[str] | None = None) -> int:
     appraise.add_argument("--ctx-file", type=Path)
     appraise.add_argument("--json", action="store_true", help="emit machine-readable appraisal result")
 
+    raw = sub.add_parser(
+        "appraise-raw",
+        help="appraise a raw SNP report (no HCL/vTPM; e.g. ACI Confidential Containers)",
+    )
+    raw.add_argument("bundle", type=Path)
+    raw.add_argument("--roots", type=Path, default=Path("roots/amd"))
+    raw.add_argument("--policy", type=Path)
+    host_data_group = raw.add_mutually_exclusive_group()
+    host_data_group.add_argument("--host-data", help="expected HOST_DATA as 64 hex chars")
+    host_data_group.add_argument(
+        "--cce-policy-file",
+        type=Path,
+        help="file holding the base64 CCE policy; expected HOST_DATA = SHA-256 of decoded bytes",
+    )
+    raw.add_argument("--nonce-hex", help="verifier nonce expected in REPORT_DATA (32 or 64 bytes, hex)")
+    raw.add_argument("--measurement", help="expected launch MEASUREMENT as 96 hex chars")
+    raw.add_argument("--json", action="store_true", help="emit machine-readable appraisal result")
+
     unwrap = sub.add_parser("unwrap-for-test", help="test-only guest-side AEAD unwrap proof")
     unwrap.add_argument("release", type=Path)
     unwrap.add_argument("guest_private_key", type=Path)
@@ -853,6 +976,29 @@ def main(argv: list[str] | None = None) -> int:
                 for step in result.steps:
                     print(f"PASS {step['name']}: {step['detail']}")
                 print(f"ALL CHECKS PASSED; release={result.release_path}")
+            return 0
+        if args.cmd == "appraise-raw":
+            expected_host_data = None
+            if args.host_data:
+                expected_host_data = bytes.fromhex(args.host_data)
+            elif args.cce_policy_file:
+                expected_host_data = _sha256(
+                    base64.b64decode("".join(args.cce_policy_file.read_text().split()))
+                )
+            result = appraise_raw_report(
+                args.bundle,
+                roots_dir=args.roots,
+                policy=Policy.from_file(args.policy),
+                expected_host_data=expected_host_data,
+                nonce_hex=args.nonce_hex,
+                expected_measurement=bytes.fromhex(args.measurement) if args.measurement else None,
+            )
+            if args.json:
+                print(result.to_json())
+            else:
+                for step in result.steps:
+                    print(f"PASS {step['name']}: {step['detail']}")
+                print("ALL CHECKS PASSED")
             return 0
         if args.cmd == "unwrap-for-test":
             unwrap_release_for_test(args.release, args.guest_private_key, args.out)

@@ -63,7 +63,57 @@ def main() -> int:
         expect_fail("bad AMD report signature rejected", lambda: appraise_mutated(fixture, bad_report_signature))
         expect_fail("invalid TCB policy rejected", lambda: load_bad_tcb_policy(tmp))
 
-    print("\n== summary: 8 passed, 0 failed ==")
+        print("\n== raw-report appraisal (ACI path) ==")
+        raw = build_raw_fixture(tmp)
+        raw_result = verifier.appraise_raw_report(
+            raw["bundle"],
+            roots_dir=raw["roots"],
+            policy=verifier.Policy(),
+            expected_host_data=raw["host_data"],
+            nonce_hex=raw["nonce_hex"],
+        )
+        assert raw_result.host_data == raw["host_data"].hex()
+        assert raw_result.chip_id is not None
+        ok("raw appraisal passes with nonce + HOST_DATA")
+        expect_fail(
+            "raw: wrong HOST_DATA rejected",
+            lambda: verifier.appraise_raw_report(
+                raw["bundle"],
+                roots_dir=raw["roots"],
+                policy=verifier.Policy(),
+                expected_host_data=b"\x00" * 32,
+                nonce_hex=raw["nonce_hex"],
+            ),
+        )
+        expect_fail(
+            "raw: wrong nonce rejected",
+            lambda: verifier.appraise_raw_report(
+                raw["bundle"],
+                roots_dir=raw["roots"],
+                policy=verifier.Policy(),
+                expected_host_data=raw["host_data"],
+                nonce_hex="22" * 64,
+            ),
+        )
+        expect_fail(
+            "raw: wrong measurement rejected",
+            lambda: verifier.appraise_raw_report(
+                raw["bundle"],
+                roots_dir=raw["roots"],
+                policy=verifier.Policy(),
+                expected_measurement=b"\xff" * 48,
+            ),
+        )
+        expect_fail(
+            "raw: tampered report rejected",
+            lambda: verifier.appraise_raw_report(
+                raw["tampered_bundle"],
+                roots_dir=raw["roots"],
+                policy=verifier.Policy(),
+            ),
+        )
+
+    print("\n== summary: 13 passed, 0 failed ==")
     return 0
 
 
@@ -164,6 +214,45 @@ def build_fixture(tmp: Path) -> dict[str, Path | str]:
     }
 
 
+def build_raw_fixture(tmp: Path) -> dict[str, object]:
+    """Raw-report bundle (report.bin + certs/ only) mimicking the ACI CoCo path."""
+    roots = tmp / "raw-roots"
+    bundle = tmp / "raw-bundle"
+    certs = bundle / "certs"
+    (roots / "Test").mkdir(parents=True)
+    certs.mkdir(parents=True)
+
+    ark_key = rsa.generate_private_key(public_exponent=65537, key_size=2048)
+    ask_key = rsa.generate_private_key(public_exponent=65537, key_size=2048)
+    vcek_key = ec.generate_private_key(ec.SECP384R1())
+    ark_cert = make_cert("ARK-Raw", "ARK-Raw", ark_key.public_key(), ark_key, is_ca=True)
+    ask_cert = make_cert("SEV-Raw", "ARK-Raw", ask_key.public_key(), ark_key, is_ca=True)
+    vcek_cert = make_cert("VCEK-Raw", "SEV-Raw", vcek_key.public_key(), ask_key, is_ca=False)
+    write_pem(roots / "Test" / "ark.pem", ark_cert)
+    write_pem(roots / "Test" / "ask.pem", ask_cert)
+    write_pem(certs / "vcek.pem", vcek_cert)
+
+    nonce = bytes(range(64))
+    host_data = verifier._sha256(b"synthetic-cce-policy")
+    report = make_report(b"", vcek_key, report_data=nonce, host_data=host_data)
+    (bundle / "report.bin").write_bytes(report)
+
+    tampered_bundle = tmp / "raw-bundle-tampered"
+    (tampered_bundle / "certs").mkdir(parents=True)
+    write_pem(tampered_bundle / "certs" / "vcek.pem", vcek_cert)
+    tampered = bytearray(report)
+    tampered[0x090] ^= 0xFF  # flip a measurement byte after signing
+    (tampered_bundle / "report.bin").write_bytes(bytes(tampered))
+
+    return {
+        "roots": roots,
+        "bundle": bundle,
+        "tampered_bundle": tampered_bundle,
+        "host_data": host_data,
+        "nonce_hex": nonce.hex(),
+    }
+
+
 def make_cert(subject_cn: str, issuer_cn: str, public_key, issuer_key, *, is_ca: bool) -> x509.Certificate:
     now = datetime.now(UTC)
     builder = (
@@ -208,7 +297,14 @@ def make_runtime_json(ak_public_key) -> bytes:
     return json.dumps(runtime, sort_keys=True, separators=(",", ":")).encode()
 
 
-def make_report(runtime_json: bytes, vcek_key, *, debug: bool = False) -> bytes:
+def make_report(
+    runtime_json: bytes,
+    vcek_key,
+    *,
+    debug: bool = False,
+    report_data: bytes | None = None,
+    host_data: bytes | None = None,
+) -> bytes:
     report = bytearray(1184)
     put_u32(report, 0x000, 5)
     put_u32(report, 0x004, 10)
@@ -226,9 +322,14 @@ def make_report(runtime_json: bytes, vcek_key, *, debug: bool = False) -> bytes:
     report[0x1E8 : 0x1EB] = bytes([29, 55, 1])
     report[0x1EC : 0x1EF] = bytes([29, 55, 1])
     report[0x1F0 : 0x1F8] = tcb
-    runtime_hash = verifier._sha256(runtime_json)
-    report[0x050 : 0x070] = runtime_hash
-    report[0x070 : 0x090] = b"\x00" * 32
+    if report_data is None:
+        runtime_hash = verifier._sha256(runtime_json)
+        report[0x050 : 0x070] = runtime_hash
+        report[0x070 : 0x090] = b"\x00" * 32
+    else:
+        report[0x050 : 0x090] = report_data
+    if host_data is not None:
+        report[0x0C0 : 0x0E0] = host_data
     der_sig = vcek_key.sign(bytes(report[:0x2A0]), ec.ECDSA(hashes.SHA384()))
     r, s = utils.decode_dss_signature(der_sig)
     report[0x2A0 : 0x2A0 + 72] = r.to_bytes(72, "little")
