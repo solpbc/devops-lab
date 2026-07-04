@@ -49,7 +49,7 @@ az group create -n "$RG" -l "$LOC"
 az aks create -g "$RG" -n "$CLUSTER" \
   --kubernetes-version "$K8S_VERSION" \
   --os-sku AzureLinux \
-  --node-vm-size Standard_D4as_v5 \
+  --node-vm-size Standard_D4as_v7 \
   --node-count 1 \
   --enable-oidc-issuer --enable-workload-identity \
   --generate-ssh-keys
