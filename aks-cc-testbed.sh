@@ -17,7 +17,7 @@ set -euo pipefail
 YAML_DIR="$(cd "$(dirname "$0")" && pwd)/yaml"   # probe pod manifests
 
 RG=solpbc-akscc-rg
-LOC=eastus                       # cc_v5 SKUs are region-limited; verify below.
+LOC=eastus2                      # cc_v5 SKUs are region-limited; verify below.
                                  # If the kata-cc pool 404s here, try westeurope/eastus2.
 CLUSTER=solpbc-akscc
 VM_SIZE=Standard_EC8as_cc_v5     # E-series: RAM-bound per cost analysis.
