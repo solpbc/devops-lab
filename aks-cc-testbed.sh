@@ -17,7 +17,7 @@ set -euo pipefail
 YAML_DIR="$(cd "$(dirname "$0")" && pwd)/yaml"   # probe pod manifests
 
 RG=solpbc-akscc-rg
-LOC=eastus2                      # cc_v5 SKUs are region-limited; verify below.
+LOC=eastus                       # cc_v5 SKUs are region-limited; verify below.
                                  # If the kata-cc pool 404s here, try westeurope/eastus2.
 CLUSTER=solpbc-akscc
 VM_SIZE=Standard_EC8as_cc_v5     # E-series: RAM-bound per cost analysis.
@@ -39,7 +39,7 @@ az vm list-skus -l "$LOC" --all -o table | grep -i as_cc_v5
 
 # pin the newest GA kubernetes version — do NOT rely on the default (see NOTE above):
 az aks get-versions -l "$LOC" -o table
-K8S_VERSION=<newest non-preview, e.g. 1.33.x>
+K8S_VERSION=1.35.5
 
 # ---------------------------------------------------------------- 1. cluster
 az group create -n "$RG" -l "$LOC"
