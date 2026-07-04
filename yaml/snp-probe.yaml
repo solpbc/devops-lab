@@ -1,0 +1,14 @@
+apiVersion: v1
+kind: Pod
+metadata:
+  name: snp-probe
+spec:
+  runtimeClassName: kata-cc-isolation
+  containers:
+    - name: probe
+      image: ubuntu:24.04
+      command: ["sleep", "infinity"]
+      resources:
+        limits:
+          memory: 2Gi
+          cpu: "1"
