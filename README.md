@@ -226,21 +226,35 @@ podman run --rm \
   bash -c 'az extension add --name confcom -y && az confcom acipolicygen -a /work/template.json -p /work/params.json --debug-mode --approve-wildcards --tar /work/tarmap.json'
 ```
 
-**4. Deploy, attest, appraise — no exec, no copy/paste.** The template binds a
-verifier nonce (the `nonceHex` deployment parameter, wildcarded in the policy
-because it's absent from `params.json`) into `REPORT_DATA` at startup, and the
-container prints the report as base64 into its logs — the report's
-machine-readable path out of the TEE. `fetch-vcek` locates the AMD cert from
-the report itself (CHIP_ID + reported TCB; `--source acccache` uses
-Microsoft's mirror of the same AMD-signed certs, no KDS rate limits). The
-verifier runs on Python ≥3.9 (macOS Command Line Tools python works) and
-needs the pinned `cryptography` package:
-`python3 -m pip install --user -r requirements.txt`.
+**4. Deploy and watch the demo.** The template binds your challenge (the
+`nonceHex` deployment parameter, wildcarded in the policy because it's absent
+from `params.json`) into `REPORT_DATA`, and the container runs the whole
+staged story — nonce, raw report, KDS VCEK, in-container appraisal — into its
+logs, just like `demo.sh` on a CVM:
 
 ```sh
 NONCE=$(openssl rand -hex 32)
 az deployment group create -g "$RG" --template-file template.json \
   --parameters @params.json --parameters nonceHex=$NONCE
+az container logs -g "$RG" -n solpbc
+```
+
+Expect the three stages, an in-container `ALL CHECKS PASSED`, and the closing
+`[TOY GAP]` notes. The demo exits when done (compute billing stops); the
+nonce is fixed per deployment, so re-attest by redeploying with a fresh
+`nonceHex`. `params.json` holds a registry password — don't commit it.
+
+**4b. Verify for real, owner-side.** The in-container appraisal is the toy —
+the verifier ran inside the TEE it was judging, and it couldn't check
+HOST_DATA. The logs already carry everything an outside verifier needs: the
+report (the long base64 line) plus your nonce and template. `fetch-vcek`
+locates the AMD cert from the report itself (CHIP_ID + reported TCB;
+`--source acccache` uses Microsoft's mirror of the same AMD-signed certs, no
+KDS rate limits). The verifier runs on Python ≥3.9 (macOS Command Line Tools
+python works) and needs the pinned `cryptography` package:
+`python3 -m pip install --user -r requirements.txt`.
+
+```sh
 mkdir -p bundle
 az container logs -g "$RG" -n solpbc | grep -E '^[A-Za-z0-9+/=]{200,}$' | tail -1 | base64 -d > bundle/report.bin
 jq -r '.resources[0].properties.confidentialComputeProperties.ccePolicy' template.json > policy.b64
@@ -248,12 +262,8 @@ python3 verifier.py fetch-vcek bundle
 python3 verifier.py appraise-raw bundle --roots roots/amd --cce-policy-file policy.b64 --nonce-hex $NONCE
 ```
 
-Expect six `PASS` lines and `ALL CHECKS PASSED`. (`az container logs` also
-shows the container's own in-TEE run of the same appraisal — the toy demo —
-ending in its `[TOY GAP]` notes; the run above is the one that counts, since
-it happened outside the TEE with your nonce.) The nonce is fixed per
-deployment and the demo exits when done, so re-attest by redeploying with a
-fresh `nonceHex`. `params.json` holds a registry password — don't commit it.
+Expect six `PASS` lines and `ALL CHECKS PASSED` — this run is the one that
+counts: outside the TEE, your nonce, HOST_DATA checked against your policy.
 
 Notes for manual runs and debugging:
 
