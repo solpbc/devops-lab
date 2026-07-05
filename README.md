@@ -22,7 +22,8 @@ See [`docs/azure-sev-snp-attestation-brief.pdf`](docs/azure-sev-snp-attestation-
 │   ├── aci-snp-probe.json # Probe container group (stock ubuntu, zero config)
 │   └── aci-solpbc.json    # Parameterized group for the solpbc image (ACR)
 ├── requirements.txt       # Python dependency set for verifier.py
-├── demo.sh                # Default entrypoint: full challenge->attest->appraise demo
+├── demo.sh                # Default entrypoint: full challenge->attest->appraise demo (CVM)
+├── demo-aci.sh            # Owner-side ACI demo: setup / attest+appraise / clean
 ├── run.sh                 # Attester: AMD chain + vTPM quote freshness binding
 ├── verify.sh              # TOY in-container verifier (appraises the bundle)
 ├── verifier.py            # Off-CVM Python verifier spike (owner-side appraisal)
@@ -115,7 +116,24 @@ report in-TEE, appraise it off-TEE with `verifier.py appraise-raw`. Freshness
 comes from `REPORT_DATA` carrying the verifier nonce directly, and workload
 identity from `HOST_DATA` carrying the SHA-256 of the CCE policy.
 
-The command blocks below are bash/zsh-neutral and contain no `#` comments, so
+The scripted path is `demo-aci.sh`, which packages the whole flow the way
+`demo.sh` does for CVMs — except the verifier runs where it belongs, on your
+machine outside the TEE, so the demo's trust boundary is real:
+
+```sh
+./demo-aci.sh setup
+./demo-aci.sh
+./demo-aci.sh clean
+```
+
+`setup` is the slow, one-time half (resource group, ACR, amd64 image
+build/push, CCE policy); the bare invocation is the repeatable demo — fresh
+nonce, deploy, report from container logs, VCEK fetch, appraisal — and
+prints the same staged story as `demo.sh`. Resource names persist in
+`.demo-aci.env`; `clean` deletes the resource group and local scratch.
+
+The manual walkthrough below is the annotated version of what the script
+does. The command blocks are bash/zsh-neutral and contain no `#` comments, so
 they paste cleanly into a default interactive zsh (which does not accept
 comments unless `setopt interactive_comments` is set).
 

@@ -48,3 +48,6 @@ tmp/
 # ACI deployment scratch (params.json carries ACR credentials)
 params.json
 template.json
+
+.demo-aci.env
+aci-demo-out/
