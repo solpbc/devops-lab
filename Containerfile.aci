@@ -74,6 +74,12 @@ COPY --from=builder /out/snpguest /usr/local/bin/snpguest
 WORKDIR /app
 COPY fetch-report.py /app/fetch-report.py
 
+# ATTESTER-ONLY ENTRYPOINT — deliberately not demo-aci.sh. The CVM image runs
+# demo.sh (all three roles in one container, flagged there as a toy
+# arrangement); on ACI the demo's trust boundary is real: demo-aci.sh is the
+# owner-side counterpart (it deploys this image and plays the verifier, which
+# must live OUTSIDE the TEE), while this container only produces evidence.
+#
 # Fetch a report at startup and print it (base64) to stdout — i.e. into
 # container logs, which is the report's machine-readable path out of the TEE.
 # NONCE_HEX (set by templates/aci-solpbc.json from the nonceHex deployment
