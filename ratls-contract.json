@@ -1,0 +1,53 @@
+{
+  "binding": {
+    "certificate_domain": "sol-spp-ratls-certificate-bind-v1",
+    "certificate_formula": "SHA256(domain || nonce || SHA256(tls_spki_der) || SHA256(SPPGPU1_TLV))",
+    "exporter_context_formula": "SHA256(context_domain || nonce || SHA256(tls_spki_der))",
+    "exporter_domain": "sol-spp-ratls-exporter-bind-v1",
+    "exporter_formula": "SHA256(domain || nonce || SHA256(tls_spki_der) || tls_exporter || SHA256(SPPGPU1_TLV))"
+  },
+  "exporter": {
+    "context_domain": "sol-spp-ratls-exporter-context-v1",
+    "label": "EXPERIMENTAL-sol-spp-engine-attestation-v1",
+    "length": 32,
+    "proof_encoding": "DER",
+    "proof_fields": [
+      "version",
+      "owner_nonce",
+      "tls_spki_der",
+      "tls_exporter",
+      "quote_message",
+      "quote_signature",
+      "quote_pcrs"
+    ],
+    "proof_media_type": "application/vnd.sol.spp-exporter-proof-v1+der",
+    "proof_path": "/._sol/spp/exporter-proof"
+  },
+  "ingress_gate": "No credential or inference bytes are admitted until the certificate evidence and exporter proof both verify.",
+  "preface": {
+    "magic_ascii_nul": "SPPRAT1",
+    "owner_nonce_bytes": 32
+  },
+  "protocol_version": 1,
+  "x509_extension": {
+    "critical": true,
+    "encoding": "DER",
+    "fields": [
+      "version",
+      "owner_nonce",
+      "tls_spki_der",
+      "amd_report",
+      "hcl_report",
+      "ak_public_key_pem",
+      "quote_message",
+      "quote_signature",
+      "quote_pcrs",
+      "amd_ark_pem",
+      "amd_ask_pem",
+      "amd_vcek_pem",
+      "gpu_envelope"
+    ],
+    "media_type": "application/vnd.sol.spp-composite-evidence-v1+der",
+    "oid": "2.25.3708997813.3535365757.2172800616.1077671698"
+  }
+}

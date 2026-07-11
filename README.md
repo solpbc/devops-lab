@@ -27,6 +27,10 @@ See [`docs/azure-sev-snp-attestation-brief.pdf`](docs/azure-sev-snp-attestation-
 ├── run.sh                 # Attester: AMD chain + vTPM quote freshness binding
 ├── verify.sh              # TOY in-container verifier (appraises the bundle)
 ├── verifier.py            # Off-CVM Python verifier spike (owner-side appraisal)
+├── ratls_contract.py       # SPP RA-TLS identifiers + strict DER codec (code SoT)
+├── ratls-contract.json     # Generated cross-implementation contract artifact
+├── ratls_gateway.py        # TLS 1.3 evidence gate + loopback SGLang proxy
+├── ratls_collector.py      # Live H100/vTPM evidence collector for the gateway
 ├── roots/amd/             # Pinned AMD ARK/ASK roots for verifier.py
 ├── lib/
 │   └── hcl.sh             # HCLA parsing + freshness-binding helpers (custom logic)
@@ -34,6 +38,7 @@ See [`docs/azure-sev-snp-attestation-brief.pdf`](docs/azure-sev-snp-attestation-
 │   ├── build-check.sh     # Hardware-free build/lint/smoke/selftest harness
 │   ├── freshness-selftest.sh  # Off-hardware tests for lib/hcl.sh
 │   ├── python-verifier-selftest.py # Off-hardware tests for verifier.py
+│   ├── ratls-gateway-selftest.py # Live-loopback TLS/exporter gate tests
 │   └── verifier-selftest.sh   # Off-hardware tests for verify.sh
 ├── .gitignore
 └── docs/
@@ -387,6 +392,55 @@ python3 -m pip install -r requirements.txt
 ./test/python-verifier-selftest.py
 ```
 
+### SPP RA-TLS engine gateway
+
+`ratls_gateway.py` is the engine-side half of solstone confidential
+processing's Option-B+C channel. It is deliberately two-phase because a TLS
+1.3 exporter does not exist when the server Certificate message is sent:
+
+1. The owner writes `SPPRAT1\0 || nonce[32]` before TLS. The gateway creates a
+   per-connection P-256 certificate whose critical private extension carries
+   the AMD/HCLA/vTPM evidence plus the byte-exact `SPPGPU1-TLV` GPU envelope.
+   Its first AK quote binds the owner nonce, certificate SPKI, and GPU-envelope
+   digest. The owner appraises this extension in its certificate callback, so
+   a relay without the quoted private key cannot complete the handshake.
+2. Once TLS 1.3 completes, both peers derive the registered contract's exporter
+   value. The first and only request admitted is
+   `GET /._sol/spp/exporter-proof`; the gateway returns a second AK quote that
+   binds the nonce, certificate SPKI, exporter, and same GPU-envelope digest.
+   Only after the owner verifies that quote may it send an entitlement
+   credential or inference bytes. The gateway then becomes an opaque tunnel to
+   loopback SGLang and never logs or parses content.
+
+The identifiers, formulas, fixed-order DER fields, and media types live in
+`ratls_contract.py`; `ratls-contract.json` is the generated artifact for the
+journal implementation. Regenerate/check it with:
+
+```bash
+make ratls-contract
+python3 ratls_contract.py check
+```
+
+On the CC H100 CVM, after confidential-GPU onboarding and the mandatory
+CC-ON/PRODUCTION check, point the collector at NVIDIA's installed verifier
+package and start the gateway in front of loopback SGLang:
+
+```bash
+export SPP_NVIDIA_VERIFIER_SRC=/path/to/az-cgpu-onboarding/src/local_gpu_verifier
+python3 ratls_gateway.py \
+  --listen-port 9443 \
+  --upstream-host 127.0.0.1 --upstream-port 8000 \
+  --collector-command "python3 ratls_collector.py"
+```
+
+The live collector rejects a GPU outside CC ON / PRODUCTION, collects GPU
+evidence locally (there is no caller-supplied evidence/digest API), verifies
+the AMD report and chain locally, and verifies both TPM quotes before returning
+them to the gateway. It writes artifacts only to an ephemeral temporary
+directory. `make ci` exercises the full certificate-extension/exporter-proof
+interlock without hardware using a deterministic fake collector and a real
+TLS 1.3 loopback connection.
+
 ## Prerequisites
 
 - Azure DCasv5/ECasv5 (or newer) Confidential VM with vTPM enabled, provisioned
@@ -395,8 +449,8 @@ python3 -m pip install -r requirements.txt
   - `Canonical:ubuntu-24_04-lts:ubuntu-pro-cvm:latest` — Ubuntu Pro (ongoing patching)
 - `tpm2-tools`, `openssl`, `xxd`, `jq` (provided by the container; see `Containerfile`)
 - Rust toolchain (for `snpguest` with `--features hyperv`)
-- Python 3 with `cryptography` for `verifier.py` (`make install` installs the
-  pinned Python dependency range)
+- Python 3 with `cryptography` and `pyOpenSSL` for `verifier.py` and the RA-TLS
+  gateway (`make install` installs the pinned Python dependency range)
 
 ## References
 

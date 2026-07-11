@@ -87,6 +87,8 @@ run_selftest() {
   bash "${REPO_ROOT}/test/verifier-selftest.sh"
   log "Tier 3: off-CVM Python verifier self-test (no hardware)"
   python3 "${REPO_ROOT}/test/python-verifier-selftest.py"
+  log "Tier 3: SPP RA-TLS gateway self-test (no hardware)"
+  python3 "${REPO_ROOT}/test/ratls-gateway-selftest.py"
 }
 
 case "$STAGE" in
