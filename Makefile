@@ -9,7 +9,7 @@ test:
 	./test/build-check.sh selftest
 
 check:
-	$(PYTHON) -m compileall -q verifier.py ratls_contract.py ratls_collector.py ratls_gateway.py test/python-verifier-selftest.py test/ratls-gateway-selftest.py
+	$(PYTHON) -m compileall -q verifier.py ratls_contract.py ratls_collector.py ratls_gateway.py asr_shim.py strict_wav.py test/python-verifier-selftest.py test/ratls-gateway-selftest.py test/asr-shim-selftest.py
 	$(PYTHON) ratls_contract.py check
 
 ci: check test

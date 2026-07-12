@@ -5,9 +5,19 @@
 
 The client sends a bounded nonce preface, verifies the per-session certificate
 evidence during the TLS 1.3 handshake, then verifies an exporter-bound AK quote
-at the reserved proof endpoint.  Only after both phases does this process turn
-the connection into an opaque byte tunnel to loopback SGLang.  It never logs or
-parses inference request/response bodies.
+at the reserved proof endpoint.  Only after both phases does this process admit
+the connection.  It never logs or parses inference request/response bodies.
+
+Post-admission there are two proxy modes.  Without ``--audio-upstream-port``
+the connection becomes an opaque byte tunnel to the single loopback upstream
+(SGLang), byte-identical to the V5-proven behavior.  With it, the one admitted
+channel carries two serving surfaces: each HTTP/1.1 request is routed by path
+— ``/v1/audio/*`` to the ASR sidecar loopback, everything else to SGLang.  The
+relay parses request/response FRAMING only (request line, header lines, body
+lengths); bodies stream through untouched and unlogged, and any framing the
+relay cannot carry fail-closes the channel.  The Phase-1/2 admission contract
+is unchanged either way — routing is post-admission behavior, invisible to
+``ratls-contract.json``.
 
 The external collector command reads one JSON object on stdin and writes one
 JSON object on stdout.  It owns hardware-specific evidence collection; this
@@ -22,6 +32,8 @@ import base64
 import hashlib
 import json
 import logging
+import re
+import select
 import selectors
 import shlex
 import socket
@@ -56,10 +68,22 @@ LOG = logging.getLogger("spp-ratls-gateway")
 MAX_PROOF_REQUEST_BYTES = 16 * 1024
 MAX_COLLECTOR_OUTPUT_BYTES = 8 * 1024 * 1024
 DEFAULT_TIMEOUT_SECONDS = 180
+AUDIO_PATH_PREFIX = b"/v1/audio/"
+MAX_RELAY_HEAD_BYTES = 32 * 1024
+RELAY_CHUNK_BYTES = 65536
+_HEADER_NAME_RE = re.compile(rb"[!#$%&'*+.^_`|~0-9A-Za-z-]+")
 
 
 class CollectorError(RuntimeError):
     """Hardware collector failure whose external diagnostics must not escape."""
+
+
+class RelayProtocolError(ValueError):
+    """HTTP framing the fail-closed relay refuses to carry."""
+
+
+class UpstreamUnavailableError(RuntimeError):
+    """Post-admission upstream connect or mid-response failure."""
 
 
 def _b64(value: bytes) -> str:
@@ -303,6 +327,223 @@ def _tunnel(client: SSL.Connection, upstream: socket.socket) -> None:
         selector.close()
 
 
+class _RelayReader:
+    """Bounded buffered reader over an SSL connection or plain socket."""
+
+    def __init__(self, connection: Any, idle_timeout: float | None = None) -> None:
+        self._connection = connection
+        self._buffer = bytearray()
+        self._idle_timeout = idle_timeout
+
+    def _recv(self) -> bytes:
+        # The admitted SSL connection is blocking with no socket timeout, so
+        # idle enforcement needs an explicit readiness wait — but only when
+        # OpenSSL holds no already-decrypted bytes.
+        if (
+            self._idle_timeout is not None
+            and getattr(self._connection, "pending", lambda: 1)() == 0
+        ):
+            readable, _, _ = select.select([self._connection], [], [], self._idle_timeout)
+            if not readable:
+                raise TimeoutError("idle attested channel timed out")
+        try:
+            return self._connection.recv(RELAY_CHUNK_BYTES)
+        except (SSL.ZeroReturnError, SSL.SysCallError):
+            return b""
+
+    def read_head(self) -> bytes | None:
+        """Read through CRLFCRLF inclusive; None on clean EOF at a boundary."""
+        marker = b"\r\n\r\n"
+        while marker not in self._buffer:
+            if len(self._buffer) >= MAX_RELAY_HEAD_BYTES:
+                raise RelayProtocolError("head exceeds limit")
+            chunk = self._recv()
+            if not chunk:
+                if not self._buffer:
+                    return None
+                raise RelayProtocolError("peer closed mid-head")
+            self._buffer.extend(chunk)
+        index = self._buffer.index(marker) + len(marker)
+        head = bytes(self._buffer[:index])
+        del self._buffer[:index]
+        return head
+
+    def read_line(self, limit: int = 1024) -> bytes:
+        while b"\r\n" not in self._buffer:
+            if len(self._buffer) >= limit:
+                raise RelayProtocolError("line exceeds limit")
+            chunk = self._recv()
+            if not chunk:
+                raise RelayProtocolError("peer closed mid-line")
+            self._buffer.extend(chunk)
+        index = self._buffer.index(b"\r\n") + 2
+        line = bytes(self._buffer[:index])
+        del self._buffer[:index]
+        return line
+
+    def read_available(self, limit: int) -> bytes:
+        if not self._buffer:
+            chunk = self._recv()
+            if not chunk:
+                return b""
+            self._buffer.extend(chunk)
+        take = min(limit, len(self._buffer))
+        data = bytes(self._buffer[:take])
+        del self._buffer[:take]
+        return data
+
+
+def _parse_relay_headers(lines: list[bytes]) -> dict[bytes, list[bytes]]:
+    headers: dict[bytes, list[bytes]] = {}
+    for line in lines:
+        if not line:
+            continue
+        name, separator, value = line.partition(b":")
+        if not separator or not _HEADER_NAME_RE.fullmatch(name):
+            raise RelayProtocolError("malformed header line")
+        headers.setdefault(name.lower(), []).append(value.strip())
+    return headers
+
+
+def _single_content_length(headers: dict[bytes, list[bytes]]) -> int | None:
+    lengths = headers.get(b"content-length", [])
+    if not lengths:
+        return None
+    if len(lengths) > 1 or not lengths[0].isdigit():
+        raise RelayProtocolError("invalid content-length")
+    return int(lengths[0])
+
+
+def _request_body_length(headers: dict[bytes, list[bytes]]) -> int:
+    if b"expect" in headers or b"upgrade" in headers:
+        raise RelayProtocolError("unsupported request header")
+    if b"transfer-encoding" in headers:
+        raise RelayProtocolError("chunked request bodies are not carried")
+    return _single_content_length(headers) or 0
+
+
+def _response_body_mode(
+    status: int, method: bytes, headers: dict[bytes, list[bytes]]
+) -> tuple[str, int]:
+    if method == b"HEAD" or status in (204, 304):
+        return "none", 0
+    encodings = headers.get(b"transfer-encoding", [])
+    if encodings:
+        joined = b",".join(encodings).lower().replace(b" ", b"")
+        if joined != b"chunked":
+            raise RelayProtocolError("unsupported transfer-encoding")
+        return "chunked", 0
+    length = _single_content_length(headers)
+    if length is not None:
+        return "length", length
+    return "close", 0
+
+
+def _copy_exact(reader: _RelayReader, destination: Any, length: int) -> None:
+    remaining = length
+    while remaining:
+        chunk = reader.read_available(min(RELAY_CHUNK_BYTES, remaining))
+        if not chunk:
+            raise RelayProtocolError("peer closed mid-body")
+        destination.sendall(chunk)
+        remaining -= len(chunk)
+
+
+def _copy_chunked(reader: _RelayReader, destination: Any) -> None:
+    while True:
+        size_line = reader.read_line()
+        destination.sendall(size_line)
+        try:
+            chunk_size = int(size_line.strip().split(b";", 1)[0], 16)
+        except ValueError as exc:
+            raise RelayProtocolError("invalid chunk size") from exc
+        if chunk_size:
+            _copy_exact(reader, destination, chunk_size + 2)  # data + CRLF
+            continue
+        while True:  # trailer section through the final blank line
+            line = reader.read_line()
+            destination.sendall(line)
+            if line == b"\r\n":
+                return
+
+
+def _http_relay(
+    client: SSL.Connection,
+    default_upstream: tuple[str, int],
+    audio_upstream: tuple[str, int],
+    timeout: int,
+) -> None:
+    """Serial per-request HTTP/1.1 relay over the one admitted channel.
+
+    Routes each request by path to the audio or default loopback upstream on a
+    fresh per-request connection (loopback connects are ~free; no stale
+    keep-alive replay hazard).  Forwards heads verbatim and streams bodies by
+    framing only — bodies are never interpreted or logged.
+    """
+    reader = _RelayReader(client, idle_timeout=timeout)
+    while True:
+        head = reader.read_head()
+        if head is None:
+            return
+        lines = head[:-4].split(b"\r\n")
+        request_parts = lines[0].split(b" ")
+        if (
+            len(request_parts) != 3
+            or request_parts[2] != b"HTTP/1.1"
+            or not request_parts[1].startswith(b"/")
+        ):
+            raise RelayProtocolError("malformed request line")
+        method, path = request_parts[0], request_parts[1]
+        headers = _parse_relay_headers(lines[1:])
+        body_length = _request_body_length(headers)
+        target = audio_upstream if path.startswith(AUDIO_PATH_PREFIX) else default_upstream
+        try:
+            upstream = socket.create_connection(target, timeout=timeout)
+        except OSError as exc:
+            raise UpstreamUnavailableError("upstream connect failed") from exc
+        try:
+            upstream.sendall(head)
+            if body_length:
+                _copy_exact(reader, upstream, body_length)
+            upstream_reader = _RelayReader(upstream)
+            while True:
+                response_head = upstream_reader.read_head()
+                if response_head is None:
+                    raise UpstreamUnavailableError("upstream closed before response")
+                response_lines = response_head[:-4].split(b"\r\n")
+                status_parts = response_lines[0].split(b" ", 2)
+                if (
+                    len(status_parts) < 2
+                    or not status_parts[0].startswith(b"HTTP/1.1")
+                    or len(status_parts[1]) != 3
+                    or not status_parts[1].isdigit()
+                ):
+                    raise RelayProtocolError("malformed status line")
+                status = int(status_parts[1])
+                client.sendall(response_head)
+                if 100 <= status < 200:
+                    continue  # interim response; the real one follows
+                response_headers = _parse_relay_headers(response_lines[1:])
+                mode, length = _response_body_mode(status, method, response_headers)
+                if mode == "length" and length:
+                    _copy_exact(upstream_reader, client, length)
+                elif mode == "chunked":
+                    _copy_chunked(upstream_reader, client)
+                elif mode == "close":
+                    while True:
+                        chunk = upstream_reader.read_available(RELAY_CHUNK_BYTES)
+                        if not chunk:
+                            break
+                        client.sendall(chunk)
+                    return  # close-delimited response ends the channel
+                break
+        finally:
+            upstream.close()
+        connection_values = [value.lower() for value in headers.get(b"connection", [])]
+        if b"close" in connection_values:
+            return
+
+
 class GatewayServer(socketserver.ThreadingTCPServer):
     allow_reuse_address = True
     daemon_threads = True
@@ -313,10 +554,12 @@ class GatewayServer(socketserver.ThreadingTCPServer):
         collector: CommandCollector,
         upstream: tuple[str, int],
         socket_timeout: int,
+        audio_upstream: tuple[str, int] | None = None,
     ) -> None:
         self.collector = collector
         self.upstream = upstream
         self.socket_timeout = socket_timeout
+        self.audio_upstream = audio_upstream
         super().__init__(address, GatewayHandler)
 
 
@@ -355,13 +598,21 @@ class GatewayHandler(socketserver.BaseRequestHandler):
             )
             _send_proof(connection, proof.to_der())
 
-            with socket.create_connection(
-                self.server.upstream, timeout=self.server.socket_timeout
-            ) as upstream:
-                upstream.settimeout(None)
-                raw.settimeout(None)
-                LOG.info("event=attested_channel_admitted")
-                _tunnel(connection, upstream)
+            LOG.info("event=attested_channel_admitted")
+            if self.server.audio_upstream is None:
+                with socket.create_connection(
+                    self.server.upstream, timeout=self.server.socket_timeout
+                ) as upstream:
+                    upstream.settimeout(None)
+                    raw.settimeout(None)
+                    _tunnel(connection, upstream)
+            else:
+                _http_relay(
+                    connection,
+                    self.server.upstream,
+                    self.server.audio_upstream,
+                    self.server.socket_timeout,
+                )
         except Exception as exc:
             if isinstance(exc, CollectorError):
                 reason = "collector_failed"
@@ -369,6 +620,10 @@ class GatewayHandler(socketserver.BaseRequestHandler):
                 reason = "timeout"
             elif isinstance(exc, ConnectionError):
                 reason = "peer_closed"
+            elif isinstance(exc, RelayProtocolError):
+                reason = "relay_protocol_rejected"
+            elif isinstance(exc, UpstreamUnavailableError):
+                reason = "upstream_unavailable"
             elif isinstance(exc, (ValueError, SSL.Error)):
                 reason = "protocol_or_tls_rejected"
             else:
@@ -420,6 +675,12 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--listen-port", type=int, default=9443)
     parser.add_argument("--upstream-host", default="127.0.0.1")
     parser.add_argument("--upstream-port", type=int, default=8000)
+    parser.add_argument("--audio-upstream-host", default="127.0.0.1")
+    parser.add_argument(
+        "--audio-upstream-port", type=int, default=None,
+        help="route /v1/audio/* to this loopback upstream (enables the "
+        "per-request HTTP relay; omit for the single-upstream opaque tunnel)",
+    )
     parser.add_argument("--collector-command")
     parser.add_argument("--collector-timeout", type=int, default=120)
     parser.add_argument("--socket-timeout", type=int, default=180)
@@ -439,11 +700,17 @@ def main() -> int:
         format="%(asctime)s %(levelname)s %(name)s %(message)s",
     )
     collector = CommandCollector(shlex.split(args.collector_command), args.collector_timeout)
+    audio_upstream = (
+        (args.audio_upstream_host, args.audio_upstream_port)
+        if args.audio_upstream_port
+        else None
+    )
     with GatewayServer(
         (args.listen_host, args.listen_port),
         collector,
         (args.upstream_host, args.upstream_port),
         args.socket_timeout,
+        audio_upstream=audio_upstream,
     ) as server:
         host, port = server.server_address
         print(json.dumps({"event": "listening", "host": host, "port": port}), flush=True)

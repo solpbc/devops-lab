@@ -29,8 +29,11 @@ See [`docs/azure-sev-snp-attestation-brief.pdf`](docs/azure-sev-snp-attestation-
 ├── verifier.py            # Off-CVM Python verifier spike (owner-side appraisal)
 ├── ratls_contract.py       # SPP RA-TLS identifiers + strict DER codec (code SoT)
 ├── ratls-contract.json     # Generated cross-implementation contract artifact
-├── ratls_gateway.py        # TLS 1.3 evidence gate + loopback SGLang proxy
+├── ratls_gateway.py        # TLS 1.3 evidence gate + loopback proxy/path-router
 ├── ratls_collector.py      # Live H100/vTPM evidence collector for the gateway
+├── asr_shim.py             # SPP ASR sidecar: hosted STT at local parity (NeMo)
+├── strict_wav.py           # Canonical PCM16-WAV intake gate (the only audio parser)
+├── requirements-asr.txt    # Pinned NeMo serving env for the ASR sidecar venv
 ├── roots/amd/             # Pinned AMD ARK/ASK roots for verifier.py
 ├── lib/
 │   └── hcl.sh             # HCLA parsing + freshness-binding helpers (custom logic)
@@ -38,7 +41,8 @@ See [`docs/azure-sev-snp-attestation-brief.pdf`](docs/azure-sev-snp-attestation-
 │   ├── build-check.sh     # Hardware-free build/lint/smoke/selftest harness
 │   ├── freshness-selftest.sh  # Off-hardware tests for lib/hcl.sh
 │   ├── python-verifier-selftest.py # Off-hardware tests for verifier.py
-│   ├── ratls-gateway-selftest.py # Live-loopback TLS/exporter gate tests
+│   ├── ratls-gateway-selftest.py # Live-loopback TLS/exporter gate + routed-relay tests
+│   ├── asr-shim-selftest.py   # Off-hardware ASR sidecar tests (stub transcriber)
 │   └── verifier-selftest.sh   # Off-hardware tests for verify.sh
 ├── .gitignore
 └── docs/
@@ -410,7 +414,11 @@ processing's Option-B+C channel. It is deliberately two-phase because a TLS
    binds the nonce, certificate SPKI, exporter, and same GPU-envelope digest.
    Only after the owner verifies that quote may it send an entitlement
    credential or inference bytes. The gateway then becomes an opaque tunnel to
-   loopback SGLang and never logs or parses content.
+   loopback SGLang and never logs or parses content. With
+   `--audio-upstream-port` it instead relays each admitted HTTP/1.1 request by
+   path — `/v1/audio/*` to the ASR sidecar, everything else to SGLang — still
+   one attested channel, parsing framing only, never bodies; the Phase-1/2
+   admission contract is identical in both modes.
 
 The identifiers, formulas, fixed-order DER fields, and media types live in
 `ratls_contract.py`; `ratls-contract.json` is the generated artifact for the
@@ -440,6 +448,41 @@ them to the gateway. It writes artifacts only to an ephemeral temporary
 directory. `make ci` exercises the full certificate-extension/exporter-proof
 interlock without hardware using a deterministic fake collector and a real
 TLS 1.3 loopback connection.
+
+### SPP ASR sidecar (hosted STT)
+
+`asr_shim.py` is the engine's second serving surface: audio transcription at
+local parity (`nvidia/parakeet-tdt-0.6b-v3` via pinned NeMo 2.7.3, bf16, CUDA
+graphs on, micro-batch capped at 8). It speaks the journal's local STT wire —
+`POST /v1/audio/transcriptions` multipart canonical WAV → `verbose_json` with
+top-level word timestamps — plus `GET /v1/audio/models` (served-model identity)
+and `GET /v1/audio/health` (readiness). `strict_wav.py` is the ONLY parser that
+touches wire audio bytes: exactly PCM16-WAV/16 kHz/mono/≤330 s is accepted,
+everything else is rejected 400 — there is no transcoder anywhere on the box.
+
+Fail-closed by construction: the CC-ON/PRODUCTION gate re-runs on every start
+(a restart that is not in CC PRODUCTION refuses to serve), the model loads from
+a sha256-pinned local `.nemo` artifact (zero runtime model egress), readiness
+flips only after an inference self-smoke, the queue is bounded (429 +
+`Retry-After` under pressure, 413 oversize, 503 warming, 504 timeout), and
+logs/metrics are content-free (counts, durations, reason classes; Prometheus
+`/metrics` includes per-device audio-seconds keyed by the opaque
+`x-sol-device` header for capacity-shaped metering). The sidecar binds
+loopback and sits behind the gateway's `/v1/audio/*` route; `/metrics` and
+`/health` are not under the routed prefix, so they stay host-local.
+
+```bash
+python3 -m venv ~/asrenv && ~/asrenv/bin/pip install -r requirements-asr.txt
+~/asrenv/bin/python asr_shim.py \
+  --port 8100 \
+  --model-path /opt/spp-asr/parakeet-tdt-0.6b-v3.nemo \
+  --model-sha256 <pinned digest>
+```
+
+`make ci` exercises the strict intake (all nine non-canonical probe classes),
+the owned multipart parser, backpressure, readiness gating, the wire shape the
+journal client validates, and the gateway's routed-relay mode — all without
+hardware via an injected stub transcriber.
 
 ## Prerequisites
 
