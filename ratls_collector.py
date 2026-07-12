@@ -40,6 +40,11 @@ AK_HANDLE = os.environ.get("SPP_AK_HANDLE", "0x81000003")
 HCL_NV_INDEX = os.environ.get("SPP_HCL_NV_INDEX", "0x01400001")
 PCR_LIST = os.environ.get("SPP_PCR_LIST", "sha256:0,2,4,7,8,9,15,16,22,23")
 COMMAND_TIMEOUT = int(os.environ.get("SPP_COLLECT_COMMAND_TIMEOUT", "120"))
+# AMD KDS rate-limits aggressively (HTTP 429); the ARK/ASK/VCEK chain is
+# per-chip/TCB-stable, so fetch once and reuse. Verification still runs on
+# every collection; a stale cached chain falls back to one refetch.
+VCEK_CACHE_DIR = os.environ.get("SPP_VCEK_CACHE_DIR", "/var/tmp/spp-vcek-cache")
+_CHAIN_FILES = ("ark.pem", "ask.pem", "vcek.pem")
 
 
 def _b64(value: bytes) -> str:
@@ -173,6 +178,33 @@ def _quote(directory: Path, qualifying_data: bytes) -> dict[str, str]:
     }
 
 
+def _amd_chain(certs: Path, report: Path) -> None:
+    """Materialize + verify the ARK/ASK/VCEK chain, KDS-fetching at most once."""
+    cache = Path(VCEK_CACHE_DIR)
+    for source in ("cache", "fetch"):
+        if source == "cache":
+            if not all((cache / name).is_file() for name in _CHAIN_FILES):
+                continue
+            for name in _CHAIN_FILES:
+                (certs / name).write_bytes((cache / name).read_bytes())
+        else:
+            _run("snpguest", "fetch", "ca", "pem", str(certs), "--report", str(report))
+            _run("snpguest", "fetch", "vcek", "pem", str(certs), str(report))
+        try:
+            _run("snpguest", "verify", "certs", str(certs))
+            _run("snpguest", "verify", "attestation", str(certs), str(report))
+        except RuntimeError:
+            if source == "fetch":
+                raise
+            continue  # cached chain went stale (TCB bump); refetch once
+        if source == "fetch":
+            cache.mkdir(parents=True, exist_ok=True)
+            for name in _CHAIN_FILES:
+                (cache / name).write_bytes((certs / name).read_bytes())
+        return
+    raise RuntimeError("AMD certificate chain could not be materialized")
+
+
 def _certificate_evidence(request: dict[str, Any]) -> dict[str, str]:
     if request.get("binding_domain") != CERTIFICATE_BINDING_DOMAIN.decode("ascii"):
         raise ValueError("wrong certificate binding domain")
@@ -197,10 +229,7 @@ def _certificate_evidence(request: dict[str, Any]) -> dict[str, str]:
         certs = directory / "certs"
         certs.mkdir()
         _run("snpguest", "report", "--platform", str(report), str(request_file))
-        _run("snpguest", "fetch", "ca", "pem", str(certs), "--report", str(report))
-        _run("snpguest", "fetch", "vcek", "pem", str(certs), str(report))
-        _run("snpguest", "verify", "certs", str(certs))
-        _run("snpguest", "verify", "attestation", str(certs), str(report))
+        _amd_chain(certs, report)
         _run("tpm2_nvread", "-C", "o", HCL_NV_INDEX, "-o", str(hcl_report))
         quote = _quote(directory, qualifying_data)
         return {
