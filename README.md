@@ -434,11 +434,16 @@ CC-ON/PRODUCTION check, point the collector at NVIDIA's installed verifier
 package and start the gateway in front of loopback SGLang:
 
 ```bash
-export SPP_NVIDIA_VERIFIER_SRC=/path/to/az-cgpu-onboarding/src/local_gpu_verifier
+# the directory that CONTAINS the `verifier` package dir (note the /src)
+export SPP_NVIDIA_VERIFIER_SRC=/usr/local/lib/local_gpu_verifier/src
+# the verifier package requires Python >=3.12,<3.13 (V4.3.3 pyproject);
+# onboarding step-2 installs a uv-managed 3.12 venv at
+# /usr/local/lib/local_gpu_verifier/.venv (root-owned — run the collector
+# via sudo, or stand up a user-owned 3.12 venv and `pip install` the tree)
 python3 ratls_gateway.py \
   --listen-port 9443 \
   --upstream-host 127.0.0.1 --upstream-port 8000 \
-  --collector-command "python3 ratls_collector.py"
+  --collector-command "sudo env SPP_NVIDIA_VERIFIER_SRC=$SPP_NVIDIA_VERIFIER_SRC /usr/local/lib/local_gpu_verifier/.venv/bin/python ratls_collector.py"
 ```
 
 The live collector rejects a GPU outside CC ON / PRODUCTION, collects GPU

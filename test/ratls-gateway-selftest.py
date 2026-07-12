@@ -313,6 +313,45 @@ class RatlsGatewayTest(unittest.TestCase):
             upstream.listener.close()
 
 
+class CollectorVendorImportTest(unittest.TestCase):
+    def test_vendor_import_beats_sibling_verifier_module(self) -> None:
+        """The vendor `verifier` tree has no __init__.py; the repo's own
+        verifier.py next to ratls_collector.py must not steal the import."""
+        import os
+        import tempfile
+
+        with tempfile.TemporaryDirectory() as temp:
+            vendor = Path(temp)
+            (vendor / "verifier" / "nvml").mkdir(parents=True)
+            (vendor / "verifier" / "cc_admin.py").write_text("MARK = 'vendor'\n")
+            (vendor / "verifier" / "nvml" / "gpu_cert_chains.py").write_text(
+                "class GpuCertificateChains:\n    pass\n"
+            )
+            environment_backup = os.environ.get("SPP_NVIDIA_VERIFIER_SRC")
+            path_backup = list(sys.path)
+            modules_backup = {
+                name: module for name, module in sys.modules.items()
+                if name == "verifier" or name.startswith("verifier.")
+            }
+            os.environ["SPP_NVIDIA_VERIFIER_SRC"] = str(vendor)
+            try:
+                import ratls_collector
+
+                cc_admin, chains_class = ratls_collector._vendor_import()
+                self.assertEqual(cc_admin.MARK, "vendor")
+                self.assertEqual(chains_class.__name__, "GpuCertificateChains")
+            finally:
+                sys.path[:] = path_backup
+                for name in [m for m in sys.modules
+                             if m == "verifier" or m.startswith("verifier.")]:
+                    del sys.modules[name]
+                sys.modules.update(modules_backup)
+                if environment_backup is None:
+                    os.environ.pop("SPP_NVIDIA_VERIFIER_SRC", None)
+                else:
+                    os.environ["SPP_NVIDIA_VERIFIER_SRC"] = environment_backup
+
+
 class RoutedRelayTest(unittest.TestCase):
     def setUp(self) -> None:
         self.default_upstream = RecordingUpstream(b'{"upstream":"sglang"}')

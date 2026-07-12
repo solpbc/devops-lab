@@ -79,10 +79,22 @@ def _vendor_import() -> tuple[Any, Any]:
     vendor_src = os.environ.get("SPP_NVIDIA_VERIFIER_SRC")
     if not vendor_src:
         raise RuntimeError("SPP_NVIDIA_VERIFIER_SRC is required")
+    # The vendor tree ships `verifier/` WITHOUT __init__.py (namespace-style),
+    # so a regular module named verifier.py later on sys.path — this repo's
+    # own off-CVM verifier.py next to this script — would win the import
+    # scan. Drop the script directory from the path (ratls_contract is
+    # already imported) and purge any shadow before importing.
+    script_dir = str(Path(__file__).resolve().parent)
+    sys.path = [
+        entry for entry in sys.path
+        if os.path.abspath(entry or os.getcwd()) != script_dir
+    ]
     sys.path.insert(0, vendor_src)
-    verifier = importlib.import_module("verifier")
+    for name in [m for m in sys.modules if m == "verifier" or m.startswith("verifier.")]:
+        del sys.modules[name]
+    cc_admin = importlib.import_module("verifier.cc_admin")
     chains = importlib.import_module("verifier.nvml.gpu_cert_chains")
-    return verifier.cc_admin, chains.GpuCertificateChains
+    return cc_admin, chains.GpuCertificateChains
 
 
 def _gpu_tlv(owner_nonce: bytes) -> bytes:
