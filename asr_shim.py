@@ -420,13 +420,6 @@ class AsrHandler(BaseHTTPRequestHandler):
             return
         metrics = self.server.metrics
         worker = self.server.worker
-        if not worker.ready.is_set():
-            metrics.record_outcome("not_ready")
-            self._send_json(
-                503, {"error": "transcription not ready"},
-                {"Retry-After": "5"}, close=True,
-            )
-            return
         length_header = self.headers.get("Content-Length")
         if length_header is None or not length_header.strip().isdigit():
             metrics.record_outcome("rejected")
@@ -437,6 +430,19 @@ class AsrHandler(BaseHTTPRequestHandler):
             metrics.record_outcome("too_large")
             self._send_json(413, {"error": "request exceeds maximum size"}, close=True)
             return
+        body = self.rfile.read(length)
+        if len(body) != length:
+            metrics.record_outcome("rejected")
+            self._send_json(400, {"error": "truncated request body"})
+            return
+        if not worker.ready.is_set():
+            metrics.record_outcome("not_ready")
+            self._send_json(
+                503,
+                {"error": "transcription not ready"},
+                {"Retry-After": "5"},
+            )
+            return
         content_type = self.headers.get("Content-Type", "")
         boundary_match = re.search(
             r'multipart/form-data;.*boundary="?([^";,\s]+)"?', content_type
@@ -444,11 +450,6 @@ class AsrHandler(BaseHTTPRequestHandler):
         if not boundary_match:
             metrics.record_outcome("rejected")
             self._send_json(400, {"error": "expected multipart/form-data"})
-            return
-        body = self.rfile.read(length)
-        if len(body) != length:
-            metrics.record_outcome("rejected")
-            self._send_json(400, {"error": "truncated request body"})
             return
         try:
             fields = parse_multipart(body, boundary_match.group(1).encode("latin-1"))

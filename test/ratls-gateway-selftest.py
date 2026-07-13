@@ -31,7 +31,11 @@ from ratls_contract import (  # noqa: E402
     CompositeEvidence,
     ExporterProof,
 )
-from ratls_gateway import CollectorError, CommandCollector  # noqa: E402
+from ratls_gateway import (  # noqa: E402
+    MAX_AUDIO_BODY_BYTES,
+    CollectorError,
+    CommandCollector,
+)
 
 
 def recv_http(connection: SSL.Connection) -> tuple[bytes, bytes]:
@@ -203,6 +207,31 @@ def admitted_connection(
 
 
 class RatlsGatewayTest(unittest.TestCase):
+    def test_audio_body_cap_matches_asr_shim(self) -> None:
+        """CSO A7 F4: the relay must reject at the shim's exact byte cap."""
+        import ast
+
+        tree = ast.parse((ROOT / "asr_shim.py").read_text(), filename="asr_shim.py")
+        assignments = [
+            node.value
+            for node in tree.body
+            if isinstance(node, ast.Assign)
+            and any(
+                isinstance(target, ast.Name) and target.id == "MAX_REQUEST_BYTES"
+                for target in node.targets
+            )
+        ]
+        self.assertEqual(len(assignments), 1, "MAX_REQUEST_BYTES must be assigned once")
+
+        def static_int(expression: ast.expr) -> int:
+            if isinstance(expression, ast.Constant) and type(expression.value) is int:
+                return expression.value
+            if isinstance(expression, ast.BinOp) and isinstance(expression.op, ast.Mult):
+                return static_int(expression.left) * static_int(expression.right)
+            self.fail("MAX_REQUEST_BYTES must remain a static integer expression")
+
+        self.assertEqual(MAX_AUDIO_BODY_BYTES, static_int(assignments[0]))
+
     def test_der_round_trip_and_strict_trailing_reject(self) -> None:
         evidence = CompositeEvidence(*[bytes([index]) for index in range(1, 13)])
         self.assertEqual(CompositeEvidence.from_der(evidence.to_der()), evidence)

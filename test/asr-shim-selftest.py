@@ -259,6 +259,30 @@ class AsrShimTest(unittest.TestCase):
             response = sock.recv(4096)
         self.assertIn(b"413", response.split(b"\r\n", 1)[0])
 
+    def test_bad_content_type_drains_body_and_keeps_connection(self) -> None:
+        connection = http.client.HTTPConnection("127.0.0.1", self.shim.port, timeout=30)
+        try:
+            connection.request(
+                "POST",
+                "/v1/audio/transcriptions",
+                body=b"not multipart",
+                headers={"Content-Type": "application/octet-stream"},
+            )
+            response = connection.getresponse()
+            self.assertEqual(response.status, 400)
+            self.assertFalse(response.will_close)
+            response.read()
+            first_socket = connection.sock
+            self.assertIsNotNone(first_socket)
+
+            connection.request("GET", "/health")
+            response = connection.getresponse()
+            self.assertEqual(response.status, 200)
+            response.read()
+            self.assertIs(connection.sock, first_socket)
+        finally:
+            connection.close()
+
     def test_response_format_pinned(self) -> None:
         body = multipart_body(canonical_wav(1.0), {"response_format": "json"})
         status, _headers, response = self.shim.request(
@@ -306,17 +330,38 @@ class BackpressureAndReadinessTest(unittest.TestCase):
         fixture.port = server.server_address[1]
         fixture.thread = threading.Thread(target=server.serve_forever, daemon=True)
         fixture.thread.start()
+        connection = http.client.HTTPConnection("127.0.0.1", fixture.port, timeout=30)
         try:
-            status, _body = fixture.post_wav(canonical_wav(1.0))
-            self.assertEqual(status, 503)
-            status, _headers, _body = fixture.request("GET", "/health")
-            self.assertEqual(status, 503)
+            body = multipart_body(canonical_wav(1.0))
+            connection.request(
+                "POST",
+                "/v1/audio/transcriptions",
+                body=body,
+                headers={"Content-Type": f"multipart/form-data; boundary={BOUNDARY}"},
+            )
+            response = connection.getresponse()
+            self.assertEqual(response.status, 503)
+            self.assertFalse(response.will_close)
+            response.read()
+            first_socket = connection.sock
+            self.assertIsNotNone(first_socket)
+
+            connection.request("GET", "/health")
+            response = connection.getresponse()
+            self.assertEqual(response.status, 503)
+            response.read()
+            self.assertIs(connection.sock, first_socket)
+
             gate.set()
             fixture.wait_ready()
-            status, _headers, _body = fixture.request("GET", "/health")
-            self.assertEqual(status, 200)
+            connection.request("GET", "/health")
+            response = connection.getresponse()
+            self.assertEqual(response.status, 200)
+            response.read()
+            self.assertIs(connection.sock, first_socket)
         finally:
             gate.set()
+            connection.close()
             fixture.close()
 
     def test_bounded_queue_returns_429(self) -> None:
