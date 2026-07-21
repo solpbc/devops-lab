@@ -1,6 +1,0 @@
-# ASR sidecar (asr_shim.py) serving environment — install in a dedicated venv
-# on the engine box, NOT alongside the gateway requirements (torch is heavy).
-# The shim itself is stdlib + numpy; NeMo is the serving runtime.
-# Pin hard: NeMo is mid-split (NeMo -> NeMo-Speech); re-qualify smokes A-H on
-# any bump. Model artifact is sha256-pinned separately (deployment recipe).
-nemo_toolkit[asr]==2.7.3

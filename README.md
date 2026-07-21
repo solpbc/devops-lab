@@ -1,6 +1,12 @@
-# solpbc
+# devops-lab
 
 Tooling for AMD SEV-SNP attestation on Azure Confidential VMs, without relying on Microsoft Azure Attestation (MAA) as the verification authority.
+
+> **Production engine moved:** the operated confidential-processing engine now
+> lives in [`solpbc/conf-proc`](https://github.com/solpbc/conf-proc). Do not
+> deploy the engine from this lab repository. Historical security-review pins,
+> including `4cf26b3` and `ef379c7`, remain resolvable in this repository's Git
+> history.
 
 ## Background
 
@@ -27,14 +33,6 @@ See [`docs/azure-sev-snp-attestation-brief.pdf`](docs/azure-sev-snp-attestation-
 ├── run.sh                 # Attester: AMD chain + vTPM quote freshness binding
 ├── verify.sh              # TOY in-container verifier (appraises the bundle)
 ├── verifier.py            # Off-CVM Python verifier spike (owner-side appraisal)
-├── ratls_contract.py       # SPP RA-TLS identifiers + strict DER codec (code SoT)
-├── ratls-contract.json     # Generated cross-implementation contract artifact
-├── ratls_gateway.py        # TLS 1.3 evidence gate + loopback proxy/path-router
-├── spp_health.py           # Content-free on-box serving + RA-TLS health SOT
-├── ratls_collector.py      # Live H100/vTPM evidence collector for the gateway
-├── asr_shim.py             # SPP ASR sidecar: hosted STT at local parity (NeMo)
-├── strict_wav.py           # Canonical PCM16-WAV intake gate (the only audio parser)
-├── requirements-asr.txt    # Pinned NeMo serving env for the ASR sidecar venv
 ├── roots/amd/             # Pinned AMD ARK/ASK roots for verifier.py
 ├── lib/
 │   └── hcl.sh             # HCLA parsing + freshness-binding helpers (custom logic)
@@ -42,8 +40,6 @@ See [`docs/azure-sev-snp-attestation-brief.pdf`](docs/azure-sev-snp-attestation-
 │   ├── build-check.sh     # Hardware-free build/lint/smoke/selftest harness
 │   ├── freshness-selftest.sh  # Off-hardware tests for lib/hcl.sh
 │   ├── python-verifier-selftest.py # Off-hardware tests for verifier.py
-│   ├── ratls-gateway-selftest.py # Live-loopback TLS/exporter gate + routed-relay tests
-│   ├── asr-shim-selftest.py   # Off-hardware ASR sidecar tests (stub transcriber)
 │   └── verifier-selftest.sh   # Off-hardware tests for verify.sh
 ├── .gitignore
 └── docs/
@@ -397,102 +393,6 @@ python3 -m pip install -r requirements.txt
 ./test/python-verifier-selftest.py
 ```
 
-### SPP RA-TLS engine gateway
-
-`ratls_gateway.py` is the engine-side half of solstone confidential
-processing's Option-B+C channel. It is deliberately two-phase because a TLS
-1.3 exporter does not exist when the server Certificate message is sent:
-
-1. The owner writes `SPPRAT1\0 || nonce[32]` before TLS. The gateway creates a
-   per-connection P-256 certificate whose critical private extension carries
-   the AMD/HCLA/vTPM evidence plus the byte-exact `SPPGPU1-TLV` GPU envelope.
-   Its first AK quote binds the owner nonce, certificate SPKI, and GPU-envelope
-   digest. The owner appraises this extension in its certificate callback, so
-   a relay without the quoted private key cannot complete the handshake.
-2. Once TLS 1.3 completes, both peers derive the contract-defined exporter
-   value. The first and only request admitted is
-   `GET /._sol/spp/exporter-proof`; the gateway returns a second AK quote that
-   binds the nonce, certificate SPKI, exporter, and same GPU-envelope digest.
-   Only after the owner verifies that quote may it send an entitlement
-   credential or inference bytes. The gateway then becomes an opaque tunnel to
-   loopback SGLang and never logs or parses content. With
-   `--audio-upstream-port` it instead relays each admitted HTTP/1.1 request by
-   path — `/v1/audio/*` to the ASR sidecar, everything else to SGLang — still
-   one attested channel, parsing framing only, never bodies; the Phase-1/2
-   admission contract is identical in both modes.
-
-The identifiers, formulas, fixed-order DER fields, and media types live in
-`ratls_contract.py`; `ratls-contract.json` is the generated artifact for the
-journal implementation. Regenerate/check it with:
-
-```bash
-make ratls-contract
-python3 ratls_contract.py check
-```
-
-On the CC H100 CVM, after confidential-GPU onboarding and the mandatory
-CC-ON/PRODUCTION check, point the collector at NVIDIA's installed verifier
-package and start the gateway in front of loopback SGLang:
-
-```bash
-# the directory that CONTAINS the `verifier` package dir (note the /src)
-export SPP_NVIDIA_VERIFIER_SRC=/usr/local/lib/local_gpu_verifier/src
-# the verifier package requires Python >=3.12,<3.13 (V4.3.3 pyproject);
-# onboarding step-2 installs a uv-managed 3.12 venv at
-# /usr/local/lib/local_gpu_verifier/.venv (root-owned — run the collector
-# via sudo, or stand up a user-owned 3.12 venv and `pip install` the tree)
-python3 ratls_gateway.py \
-  --listen-port 9443 \
-  --upstream-host 127.0.0.1 --upstream-port 8000 \
-  --collector-command "sudo env SPP_NVIDIA_VERIFIER_SRC=$SPP_NVIDIA_VERIFIER_SRC /usr/local/lib/local_gpu_verifier/.venv/bin/python ratls_collector.py"
-```
-
-The live collector rejects a GPU outside CC ON / PRODUCTION, collects GPU
-evidence locally (there is no caller-supplied evidence/digest API), verifies
-the AMD report and chain locally, and verifies both TPM quotes before returning
-them to the gateway. It writes artifacts only to an ephemeral temporary
-directory. `make ci` exercises the full certificate-extension/exporter-proof
-interlock without hardware using a deterministic fake collector and a real
-TLS 1.3 loopback connection.
-
-### SPP ASR sidecar (hosted STT)
-
-`asr_shim.py` is the engine's second serving surface: audio transcription at
-local parity (`nvidia/parakeet-tdt-0.6b-v3` via pinned NeMo 2.7.3, bf16, CUDA
-graphs on, micro-batch capped at 8). It speaks the journal's local STT wire —
-`POST /v1/audio/transcriptions` multipart canonical WAV → `verbose_json` with
-top-level word timestamps — plus `GET /v1/audio/models` (served-model identity)
-and `GET /v1/audio/health` (readiness). `strict_wav.py` is the ONLY parser that
-touches wire audio bytes: exactly PCM16-WAV/16 kHz/mono/≤330 s is accepted,
-everything else is rejected 400 — no transcoder is reachable with wire bytes
-(NeMo's transitive audio libraries are installed but never invoked on wire
-bytes; the import-hygiene selftest pins that neither wire parser imports a
-decoder library).
-
-Fail-closed by construction: the CC-ON/PRODUCTION gate re-runs on every start
-(a restart that is not in CC PRODUCTION refuses to serve), the model loads from
-a sha256-pinned local `.nemo` artifact (zero runtime model egress), readiness
-flips only after an inference self-smoke, the queue is bounded (429 +
-`Retry-After` under pressure, 413 oversize, 503 warming, 504 timeout), and
-logs/metrics are content-free (counts, durations, reason classes; Prometheus
-`/metrics` includes per-device audio-seconds keyed by the opaque
-`x-sol-device` header for capacity-shaped metering). The sidecar binds
-loopback and sits behind the gateway's `/v1/audio/*` route; `/metrics` and
-`/health` are not under the routed prefix, so they stay host-local.
-
-```bash
-python3 -m venv ~/asrenv && ~/asrenv/bin/pip install -r requirements-asr.txt
-~/asrenv/bin/python asr_shim.py \
-  --port 8100 \
-  --model-path /opt/spp-asr/parakeet-tdt-0.6b-v3.nemo \
-  --model-sha256 <pinned digest>
-```
-
-`make ci` exercises the strict intake (all nine non-canonical probe classes),
-the owned multipart parser, backpressure, readiness gating, the wire shape the
-journal client validates, and the gateway's routed-relay mode — all without
-hardware via an injected stub transcriber.
-
 ## Prerequisites
 
 - Azure DCasv5/ECasv5 (or newer) Confidential VM with vTPM enabled, provisioned
@@ -501,26 +401,8 @@ hardware via an injected stub transcriber.
   - `Canonical:ubuntu-24_04-lts:ubuntu-pro-cvm:latest` — Ubuntu Pro (ongoing patching)
 - `tpm2-tools`, `openssl`, `xxd`, `jq` (provided by the container; see `Containerfile`)
 - Rust toolchain (for `snpguest` with `--features hyperv`)
-- Python 3 with `cryptography` and `pyOpenSSL` for `verifier.py` and the RA-TLS
-  gateway (`make install` installs the pinned Python dependency range)
-
-### Persistent engine health
-
-`spp_health.py` is the single source of truth for whether the persistent SPP
-engine is fit to serve. Install it as `spp-health` on the engine and run:
-
-```bash
-sudo ln -sfn "$PWD/spp_health.py" /usr/local/bin/spp-health
-spp-health --json
-```
-
-Healthy is the conjunction of CC ON/PRODUCTION, the three required systemd
-units and SGLang container, one H100 NVL with readable memory counters, a real
-SPPRAT1/TLS 1.3/exporter-proof admission, and the pinned inference and ASR
-models responding through that admitted channel. Exit is zero only when the
-document says `healthy`; an unhealthy run still emits the complete JSON and
-exits one. Output is content-free: fixed states/reason codes, model identities,
-and GPU capacity counters only—never evidence or serving content.
+- Python 3 with `cryptography` for `verifier.py` (`make install` installs the
+  pinned dependency range)
 
 ## References
 

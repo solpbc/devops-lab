@@ -2,4 +2,3 @@
 # may reject. Keep installs reproducible until the verifier has a parser path
 # for those certs under newer cryptography.
 cryptography>=46,<47
-pyOpenSSL>=23.2,<27
